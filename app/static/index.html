@@ -36,6 +36,10 @@
         <input id="keyterms" class="text-input" type="text" placeholder="Example: MSB, thẻ tín dụng" maxlength="1000" />
         <p class="hint">Separate terms with commas. Use only non-sensitive terms.</p>
 
+        <label class="field-label" for="service-key">Optional Service API key</label>
+        <input id="service-key" class="text-input" type="password" placeholder="Required only if SERVICE_API_KEY is enabled" />
+        <p class="hint">Stored in browser localStorage for convenience.</p>
+
         <button id="transcribe" class="button button-submit" type="button" disabled>Transcribe Vietnamese audio</button>
         <p id="submission-status" class="status" role="status" aria-live="polite"></p>
       </section>

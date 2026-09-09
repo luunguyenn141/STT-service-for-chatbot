@@ -3,12 +3,21 @@ const stopButton = document.querySelector("#stop-recording");
 const transcribeButton = document.querySelector("#transcribe");
 const fileInput = document.querySelector("#audio-file");
 const keytermsInput = document.querySelector("#keyterms");
+const serviceKeyInput = document.querySelector("#service-key");
 const recordingStatus = document.querySelector("#recording-status");
 const submissionStatus = document.querySelector("#submission-status");
 const selectedFile = document.querySelector("#selected-file");
 const audioPreview = document.querySelector("#audio-preview");
 const resultCard = document.querySelector("#result-card");
 const transcript = document.querySelector("#transcript");
+
+if (serviceKeyInput) {
+  const savedKey = localStorage.getItem("msb_stt_service_key");
+  if (savedKey) serviceKeyInput.value = savedKey;
+  serviceKeyInput.addEventListener("input", () => {
+    localStorage.setItem("msb_stt_service_key", serviceKeyInput.value.trim());
+  });
+}
 
 let recorder;
 let stream;
@@ -93,8 +102,18 @@ transcribeButton.addEventListener("click", async () => {
   formData.append("language", "vie");
   if (keytermsInput.value.trim()) formData.append("keyterms", keytermsInput.value.trim());
 
+  const headers = {};
+  const serviceKey = serviceKeyInput ? serviceKeyInput.value.trim() : "";
+  if (serviceKey) {
+    headers["Authorization"] = `Bearer ${serviceKey}`;
+  }
+
   try {
-    const response = await fetch("/api/v1/transcriptions", { method: "POST", body: formData });
+    const response = await fetch("/api/v1/transcriptions", {
+      method: "POST",
+      headers,
+      body: formData,
+    });
     const payload = await response.json();
     if (!response.ok) {
       throw new Error(payload?.error?.message || "Transcription failed. Please try again.");

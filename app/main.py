@@ -25,12 +25,23 @@ app = FastAPI(
     version="0.1.0",
     description="A browser-testable Vietnamese Speech-to-Text proof of concept.",
 )
+class DynamicCORSMiddleware(CORSMiddleware):
+    """CORS middleware that dynamically looks up allowed origins from current settings."""
+
+    def is_allowed_origin(self, origin: str) -> bool:
+        current_origins = get_settings().cors_origins
+        if "*" in current_origins:
+            return True
+        return origin in current_origins
+
+
 app.add_middleware(
-    CORSMiddleware,
+    DynamicCORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "x-api-key", "x-request-id", "Accept"],
+    expose_headers=["x-request-id", "X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"],
 )
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.include_router(health_router)
@@ -41,13 +52,19 @@ app.include_router(transcription_router)
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid4())
     request.state.request_id = request_id
+
+    forwarded_for = request.headers.get("x-forwarded-for")
+    client_ip = forwarded_for.split(",")[0].strip() if forwarded_for else (request.client.host if request.client else "unknown")
+    request.state.client_ip = client_ip
+
     started_at = time.perf_counter()
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
     duration_ms = round((time.perf_counter() - started_at) * 1_000)
     logger.info(
-        "request_completed request_id=%s method=%s path=%s status=%s duration_ms=%s",
+        "request_completed request_id=%s client_ip=%s method=%s path=%s status=%s duration_ms=%s",
         request_id,
+        client_ip,
         request.method,
         request.url.path,
         response.status_code,

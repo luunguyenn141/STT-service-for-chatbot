@@ -5,7 +5,9 @@ from app.main import app
 
 
 def test_health_reports_service_status(monkeypatch):
-    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    # An empty process value takes precedence over a developer's local .env file.
+    monkeypatch.setenv("STT_PROVIDER", "elevenlabs")
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
     get_settings.cache_clear()
     with TestClient(app) as client:
         response = client.get("/health")

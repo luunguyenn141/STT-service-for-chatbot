@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+import secrets
+import time
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
@@ -8,15 +11,19 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings, get_settings
 from app.models import TranscriptionResponse, WordTiming
+from app.services.rate_limiter import rate_limiter
 from app.services.stt.base import (
     ProviderError,
     ProviderNoSpeech,
     ProviderRateLimited,
     ProviderTimeout,
     ProviderUnavailable,
+    STTProvider,
 )
 from app.services.stt.elevenlabs import ElevenLabsSTTProvider
+from app.services.stt.phowhisper import PhoWhisperSTTProvider
 
+logger = logging.getLogger("stt_poc.audit")
 router = APIRouter(prefix="/api/v1", tags=["transcriptions"])
 
 SUPPORTED_MIME_TYPES = {
@@ -41,13 +48,57 @@ async def create_transcription(
     keyterms: str | None = Form(None),
 ):
     request_id = getattr(request.state, "request_id", str(uuid4()))
-
-    if audio is None:
-        return _error(400, "missing_audio", "Upload an audio file to transcribe.", request_id)
-
+    client_ip = getattr(request.state, "client_ip", "unknown")
     settings = get_settings()
 
+    # 1. Service-to-service Authentication
+    if not _is_authenticated(request, settings):
+        logger.warning(
+            "audit_event=transcription_auth_failed request_id=%s client_ip=%s",
+            request_id,
+            client_ip,
+        )
+        return _error(401, "unauthorized", "Invalid or missing service API key.", request_id)
+
+    # 2. Rate Limiting (per client IP)
+    allowed, remaining, retry_after = rate_limiter.is_allowed(
+        client_ip, limit=settings.rate_limit_per_minute
+    )
+    if not allowed:
+        logger.warning(
+            "audit_event=transcription_rate_limited request_id=%s client_ip=%s limit=%d",
+            request_id,
+            client_ip,
+            settings.rate_limit_per_minute,
+        )
+        headers = {
+            "Retry-After": str(retry_after),
+            "X-RateLimit-Limit": str(settings.rate_limit_per_minute),
+            "X-RateLimit-Remaining": "0",
+        }
+        return _error(
+            429,
+            "rate_limit_exceeded",
+            f"Rate limit exceeded. Please retry in {retry_after} seconds.",
+            request_id,
+            headers=headers,
+        )
+
+    # 3. Payload validation
+    if audio is None:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=missing_audio",
+            request_id,
+            client_ip,
+        )
+        return _error(400, "missing_audio", "Upload an audio file to transcribe.", request_id)
+
     if not settings.configured:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=provider_not_configured",
+            request_id,
+            client_ip,
+        )
         return _error(
             503,
             "provider_not_configured",
@@ -58,6 +109,12 @@ async def create_transcription(
     filename = audio.filename or "recording"
     content_type = (audio.content_type or "").lower()
     if not _is_supported_audio(filename, content_type):
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=unsupported_audio_type filename=%s",
+            request_id,
+            client_ip,
+            filename,
+        )
         return _error(
             415,
             "unsupported_audio_type",
@@ -67,8 +124,19 @@ async def create_transcription(
 
     audio_bytes = await audio.read(settings.max_upload_bytes + 1)
     if not audio_bytes:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=empty_audio",
+            request_id,
+            client_ip,
+        )
         return _error(400, "empty_audio", "Upload a non-empty audio file.", request_id)
     if len(audio_bytes) > settings.max_upload_bytes:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=audio_too_large size_bytes=%d",
+            request_id,
+            client_ip,
+            len(audio_bytes),
+        )
         return _error(
             413,
             "audio_too_large",
@@ -78,10 +146,21 @@ async def create_transcription(
 
     normalized_language = language.strip().lower() or "vie"
     if normalized_language not in {"vi", "vie", "vi-vn"}:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=unsupported_language language=%s",
+            request_id,
+            client_ip,
+            normalized_language,
+        )
         return _error(400, "unsupported_language", "This POC supports Vietnamese only.", request_id)
 
     resolved_keyterms = _resolve_keyterms(settings, keyterms)
     if resolved_keyterms is None:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=invalid_keyterms",
+            request_id,
+            client_ip,
+        )
         return _error(
             400,
             "invalid_keyterms",
@@ -89,6 +168,16 @@ async def create_transcription(
             request_id,
         )
 
+    logger.info(
+        "audit_event=transcription_start request_id=%s client_ip=%s provider=%s model=%s audio_bytes=%d",
+        request_id,
+        client_ip,
+        settings.stt_provider,
+        settings.active_model_id,
+        len(audio_bytes),
+    )
+
+    transcribe_start = time.perf_counter()
     provider = _build_provider(settings)
     try:
         result = await provider.transcribe(
@@ -99,13 +188,47 @@ async def create_transcription(
             keyterms=resolved_keyterms,
         )
     except ProviderNoSpeech:
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=no_speech_detected",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
         return _error(422, "no_speech_detected", "No recognizable speech was found in this audio.", request_id)
     except ProviderRateLimited:
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_rate_limited",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
         return _error(429, "provider_rate_limited", "The transcription provider is busy. Try again shortly.", request_id)
     except ProviderTimeout:
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_timeout",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
         return _error(504, "provider_timeout", "Transcription took too long. Try a shorter recording.", request_id)
     except (ProviderUnavailable, ProviderError):
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_error",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
         return _error(502, "provider_error", "The transcription provider could not process this audio.", request_id)
+
+    duration_ms = round((time.perf_counter() - transcribe_start) * 1_000)
+    logger.info(
+        "audit_event=transcription_success request_id=%s client_ip=%s provider=%s model=%s duration_ms=%d",
+        request_id,
+        client_ip,
+        settings.stt_provider,
+        settings.active_model_id,
+        duration_ms,
+    )
 
     return TranscriptionResponse(
         request_id=request_id,
@@ -123,17 +246,24 @@ async def create_transcription(
             for word in result.words
         ],
         provider=settings.stt_provider,
-        model=settings.stt_model_id,
+        model=settings.active_model_id,
     )
 
 
-def _build_provider(settings: Settings) -> ElevenLabsSTTProvider:
-    assert settings.elevenlabs_api_key is not None
-    return ElevenLabsSTTProvider(
-        api_key=settings.elevenlabs_api_key.get_secret_value(),
-        model_id=settings.stt_model_id,
-        timeout_seconds=settings.request_timeout_seconds,
-    )
+def _build_provider(settings: Settings) -> STTProvider:
+    if settings.stt_provider == "elevenlabs":
+        assert settings.elevenlabs_api_key is not None
+        return ElevenLabsSTTProvider(
+            api_key=settings.elevenlabs_api_key.get_secret_value(),
+            model_id=settings.stt_model_id,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+    if settings.stt_provider == "phowhisper":
+        return PhoWhisperSTTProvider(
+            model_id=settings.phowhisper_model_id,
+            device=settings.phowhisper_device,
+        )
+    raise RuntimeError(f"Unsupported STT provider: {settings.stt_provider}")
 
 
 def _is_supported_audio(filename: str, content_type: str) -> bool:
@@ -157,8 +287,38 @@ def _resolve_keyterms(settings: Settings, requested: str | None) -> list[str] | 
     return keyterms if len(keyterms) <= MAX_KEYTERMS else None
 
 
-def _error(status_code: int, code: str, message: str, request_id: str) -> JSONResponse:
+def _is_authenticated(request: Request, settings: Settings) -> bool:
+    if not settings.is_auth_enabled:
+        return True
+
+    assert settings.service_api_key is not None
+    expected = settings.service_api_key.get_secret_value().strip()
+
+    # 1. Check x-api-key header
+    api_key = request.headers.get("x-api-key")
+    if api_key and secrets.compare_digest(api_key.strip(), expected):
+        return True
+
+    # 2. Check Authorization: Bearer <token>
+    auth = request.headers.get("authorization")
+    if auth:
+        parts = auth.strip().split(maxsplit=1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            if secrets.compare_digest(parts[1].strip(), expected):
+                return True
+
+    return False
+
+
+def _error(
+    status_code: int,
+    code: str,
+    message: str,
+    request_id: str,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"request_id": request_id, "error": {"code": code, "message": message}},
+        headers=headers,
     )

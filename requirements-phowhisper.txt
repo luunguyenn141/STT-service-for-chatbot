@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Local PhoWhisper inference. FFmpeg must also be installed and available on PATH
+# so Transformers can decode WAV, MP3, M4A, WebM, OGG, and MP4 uploads.
+torch>=2.2,<3
+transformers>=4.45,<6

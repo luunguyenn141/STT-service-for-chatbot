@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  stt-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Set to "true" to build with local PhoWhisper runtime (PyTorch + Transformers)
+        INSTALL_PHOWHISPER: "false"
+    container_name: msb-stt-microservice
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      # Persist downloaded Hugging Face models across container restarts
+      - hf_cache:/app/.cache/huggingface
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  hf_cache:
+    name: msb_stt_hf_cache
