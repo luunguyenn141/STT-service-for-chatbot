@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.formparsers import MultiPartParser
 
 from app.api.health import router as health_router
 from app.api.transcriptions import router as transcription_router
@@ -19,6 +20,9 @@ logger = logging.getLogger("stt_poc")
 
 BASE_DIR = Path(__file__).resolve().parent
 settings = get_settings()
+# The POC permits uploads up to MAX_UPLOAD_MB, so keep those small, bounded
+# uploads in memory instead of falling back to an operating-system temp file.
+MultiPartParser.spool_max_size = settings.max_upload_bytes
 
 app = FastAPI(
     title="Vietnamese STT POC",

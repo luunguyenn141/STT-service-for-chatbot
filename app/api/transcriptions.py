@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 import secrets
 import time
 from uuid import uuid4
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import Settings, get_settings
 from app.models import TranscriptionResponse, WordTiming
@@ -40,13 +43,38 @@ MAX_KEYTERMS = 1_000
 MAX_KEYTERM_LENGTH = 50
 
 
-@router.post("/transcriptions", response_model=TranscriptionResponse)
-async def create_transcription(
-    request: Request,
-    audio: UploadFile | None = File(None),
-    language: str = Form("vie"),
-    keyterms: str | None = Form(None),
-):
+@dataclass(slots=True)
+class AudioSubmission:
+    audio_bytes: bytes
+    filename: str
+    content_type: str
+    language: str
+    keyterms: str | None
+
+
+@router.post(
+    "/transcriptions",
+    response_model=TranscriptionResponse,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["audio"],
+                        "properties": {
+                            "audio": {"type": "string", "format": "binary"},
+                            "language": {"type": "string", "default": "vie"},
+                            "keyterms": {"type": "string"},
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def create_transcription(request: Request):
     request_id = getattr(request.state, "request_id", str(uuid4()))
     client_ip = getattr(request.state, "client_ip", "unknown")
     settings = get_settings()
@@ -84,14 +112,11 @@ async def create_transcription(
             headers=headers,
         )
 
-    # 3. Payload validation
-    if audio is None:
-        logger.warning(
-            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=missing_audio",
-            request_id,
-            client_ip,
-        )
-        return _error(400, "missing_audio", "Upload an audio file to transcribe.", request_id)
+    # 3. Payload validation. Explicit parsing applies the configured file limit,
+    # avoiding Starlette's default 1 MB multipart-part limit.
+    submission = await _read_submission(request, settings, request_id, client_ip)
+    if isinstance(submission, JSONResponse):
+        return submission
 
     if not settings.configured:
         logger.warning(
@@ -106,55 +131,7 @@ async def create_transcription(
             request_id,
         )
 
-    filename = audio.filename or "recording"
-    content_type = (audio.content_type or "").lower()
-    if not _is_supported_audio(filename, content_type):
-        logger.warning(
-            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=unsupported_audio_type filename=%s",
-            request_id,
-            client_ip,
-            filename,
-        )
-        return _error(
-            415,
-            "unsupported_audio_type",
-            "Upload WAV, MP3, M4A, WebM, OGG, or MP4 audio.",
-            request_id,
-        )
-
-    audio_bytes = await audio.read(settings.max_upload_bytes + 1)
-    if not audio_bytes:
-        logger.warning(
-            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=empty_audio",
-            request_id,
-            client_ip,
-        )
-        return _error(400, "empty_audio", "Upload a non-empty audio file.", request_id)
-    if len(audio_bytes) > settings.max_upload_bytes:
-        logger.warning(
-            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=audio_too_large size_bytes=%d",
-            request_id,
-            client_ip,
-            len(audio_bytes),
-        )
-        return _error(
-            413,
-            "audio_too_large",
-            f"Audio must be no larger than {settings.max_upload_mb} MB.",
-            request_id,
-        )
-
-    normalized_language = language.strip().lower() or "vie"
-    if normalized_language not in {"vi", "vie", "vi-vn"}:
-        logger.warning(
-            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=unsupported_language language=%s",
-            request_id,
-            client_ip,
-            normalized_language,
-        )
-        return _error(400, "unsupported_language", "This POC supports Vietnamese only.", request_id)
-
-    resolved_keyterms = _resolve_keyterms(settings, keyterms)
+    resolved_keyterms = _resolve_keyterms(settings, submission.keyterms)
     if resolved_keyterms is None:
         logger.warning(
             "audit_event=transcription_rejected request_id=%s client_ip=%s reason=invalid_keyterms",
@@ -174,16 +151,16 @@ async def create_transcription(
         client_ip,
         settings.stt_provider,
         settings.active_model_id,
-        len(audio_bytes),
+        len(submission.audio_bytes),
     )
 
     transcribe_start = time.perf_counter()
     provider = _build_provider(settings)
     try:
         result = await provider.transcribe(
-            audio_bytes=audio_bytes,
-            filename=filename,
-            content_type=content_type or "application/octet-stream",
+            audio_bytes=submission.audio_bytes,
+            filename=submission.filename,
+            content_type=submission.content_type or "application/octet-stream",
             language="vie",
             keyterms=resolved_keyterms,
         )
@@ -268,6 +245,94 @@ def _build_provider(settings: Settings) -> STTProvider:
 
 def _is_supported_audio(filename: str, content_type: str) -> bool:
     return content_type in SUPPORTED_MIME_TYPES or Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS
+
+
+async def _read_submission(
+    request: Request,
+    settings: Settings,
+    request_id: str,
+    client_ip: str,
+) -> AudioSubmission | JSONResponse:
+    """Read a single multipart upload and release it after copying its bytes."""
+    try:
+        form = await request.form(
+            max_files=1,
+            max_fields=2,
+            max_part_size=settings.max_upload_bytes,
+        )
+    except StarletteHTTPException:
+        logger.warning(
+            "audit_event=transcription_rejected request_id=%s client_ip=%s reason=invalid_multipart",
+            request_id,
+            client_ip,
+        )
+        return _error(400, "invalid_multipart", "Send one audio file as multipart/form-data.", request_id)
+
+    try:
+        audio = form.get("audio")
+        if audio is None:
+            logger.warning(
+                "audit_event=transcription_rejected request_id=%s client_ip=%s reason=missing_audio",
+                request_id,
+                client_ip,
+            )
+            return _error(400, "missing_audio", "Upload an audio file to transcribe.", request_id)
+        if not isinstance(audio, StarletteUploadFile):
+            return _error(400, "invalid_audio", "The audio field must be an uploaded file.", request_id)
+
+        filename = audio.filename or "recording"
+        content_type = (audio.content_type or "").lower()
+        if not _is_supported_audio(filename, content_type):
+            logger.warning(
+                "audit_event=transcription_rejected request_id=%s client_ip=%s reason=unsupported_audio_type filename=%s",
+                request_id,
+                client_ip,
+                filename,
+            )
+            return _error(
+                415,
+                "unsupported_audio_type",
+                "Upload WAV, MP3, M4A, WebM, OGG, or MP4 audio.",
+                request_id,
+            )
+
+        audio_bytes = await audio.read(settings.max_upload_bytes + 1)
+        if not audio_bytes:
+            return _error(400, "empty_audio", "Upload a non-empty audio file.", request_id)
+        if len(audio_bytes) > settings.max_upload_bytes:
+            logger.warning(
+                "audit_event=transcription_rejected request_id=%s client_ip=%s reason=audio_too_large size_bytes=%d",
+                request_id,
+                client_ip,
+                len(audio_bytes),
+            )
+            return _error(
+                413,
+                "audio_too_large",
+                f"Audio must be no larger than {settings.max_upload_mb} MB.",
+                request_id,
+            )
+
+        language = form.get("language", "vie")
+        if not isinstance(language, str):
+            return _error(400, "invalid_language", "Language must be text.", request_id)
+        normalized_language = language.strip().lower() or "vie"
+        if normalized_language not in {"vi", "vie", "vi-vn"}:
+            return _error(400, "unsupported_language", "This POC supports Vietnamese only.", request_id)
+
+        keyterms = form.get("keyterms")
+        if keyterms is not None and not isinstance(keyterms, str):
+            return _error(400, "invalid_keyterms", "Keyterms must be comma-separated text.", request_id)
+
+        return AudioSubmission(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            content_type=content_type,
+            language=normalized_language,
+            keyterms=keyterms,
+        )
+    finally:
+        await form.close()
 
 
 def _resolve_keyterms(settings: Settings, requested: str | None) -> list[str] | None:
