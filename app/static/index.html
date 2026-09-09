@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Vietnamese Speech-to-Text proof of concept" />
+    <title>Vietnamese STT POC</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero" aria-labelledby="page-title">
+        <p class="eyebrow">ELEVENLABS × VIETNAMESE</p>
+        <h1 id="page-title">Vietnamese STT POC</h1>
+        <p class="lead">Record a short Vietnamese sentence or upload an audio file to test speech-to-text end to end.</p>
+      </section>
+
+      <section class="card" aria-labelledby="input-title">
+        <h2 id="input-title">Audio input</h2>
+        <p class="hint">Use only demo audio. Do not record account numbers, card details, or customer information.</p>
+
+        <div class="recording-controls">
+          <button id="start-recording" class="button button-primary" type="button">Start recording</button>
+          <button id="stop-recording" class="button button-secondary" type="button" disabled>Stop recording</button>
+          <span id="recording-status" class="status" role="status">Ready to record</span>
+        </div>
+
+        <div class="divider"><span>or</span></div>
+
+        <label class="upload-label" for="audio-file">Upload audio</label>
+        <input id="audio-file" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/ogg,audio/webm,.wav,.mp3,.m4a,.ogg,.webm" />
+        <p id="selected-file" class="hint">No file selected.</p>
+        <audio id="audio-preview" class="audio-preview" controls hidden></audio>
+
+        <label class="field-label" for="keyterms">Optional banking terms</label>
+        <input id="keyterms" class="text-input" type="text" placeholder="Example: MSB, thẻ tín dụng" maxlength="1000" />
+        <p class="hint">Separate terms with commas. Use only non-sensitive terms.</p>
+
+        <button id="transcribe" class="button button-submit" type="button" disabled>Transcribe Vietnamese audio</button>
+        <p id="submission-status" class="status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="result-card" class="card result-card" aria-labelledby="result-title" hidden>
+        <h2 id="result-title">Transcript</h2>
+        <p id="transcript" class="transcript"></p>
+        <dl class="metadata">
+          <div><dt>Language</dt><dd id="result-language">—</dd></div>
+          <div><dt>Probability</dt><dd id="result-probability">—</dd></div>
+          <div><dt>Words</dt><dd id="result-words">—</dd></div>
+          <div><dt>Request ID</dt><dd id="result-request-id">—</dd></div>
+        </dl>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
