@@ -15,7 +15,7 @@ services:
       ALLOWED_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env.production}
     gpus: all
     ports:
-      - "${DIRECT_HTTP_BIND:-127.0.0.1:8080}:8000"
+      - "${DIRECT_HTTP_PORT:-8080}:8000"
     networks:
       - backend
     read_only: true

@@ -7,11 +7,12 @@ services:
       dockerfile: Dockerfile
       args:
         # Set to "true" to build with local PhoWhisper runtime (PyTorch + Transformers)
-        INSTALL_PHOWHISPER: "false"
+        INSTALL_PHOWHISPER: "${INSTALL_PHOWHISPER:-true}"
+        PYTORCH_INDEX_URL: "${PYTORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
     container_name: msb-stt-microservice
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8080:8000"
     env_file:
       - .env
     volumes:
@@ -22,7 +23,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 45s
 
 volumes:
   hf_cache:

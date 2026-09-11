@@ -1,0 +1,44 @@
+name: msb-stt-cpu-production
+
+services:
+  stt-service:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        INSTALL_PHOWHISPER: "true"
+        PYTORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-.env.production}
+    environment:
+      PHOWHISPER_DEVICE: "-1"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
+    ports:
+      - "${PORT:-8080}:8000"
+    networks:
+      - backend
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - hf_cache:/app/.cache/huggingface
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+
+networks:
+  backend:
+
+volumes:
+  hf_cache:
