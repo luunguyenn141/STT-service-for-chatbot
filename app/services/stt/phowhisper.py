@@ -18,6 +18,11 @@ Pipeline = Callable[[bytes], dict[str, Any]]
 PipelineLoader = Callable[[str, int], Pipeline]
 
 
+def preload_phowhisper(model_id: str, device: int) -> None:
+    """Download and load PhoWhisper so readiness implies inference is available."""
+    _load_pipeline(model_id, device)
+
+
 class PhoWhisperSTTProvider(STTProvider):
     """Local Vietnamese transcription through VinAI's PhoWhisper model.
 

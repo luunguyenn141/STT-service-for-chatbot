@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 import logging
 import time
 from pathlib import Path
@@ -14,6 +16,7 @@ from starlette.formparsers import MultiPartParser
 from app.api.health import router as health_router
 from app.api.transcriptions import router as transcription_router
 from app.config import get_settings
+from app.services.stt.phowhisper import preload_phowhisper
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("stt_poc")
@@ -24,11 +27,32 @@ settings = get_settings()
 # uploads in memory instead of falling back to an operating-system temp file.
 MultiPartParser.spool_max_size = settings.max_upload_bytes
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if settings.stt_provider == "phowhisper" and settings.phowhisper_preload:
+        logger.info(
+            "preloading_phowhisper model=%s device=%s",
+            settings.phowhisper_model_id,
+            settings.phowhisper_device,
+        )
+        await asyncio.to_thread(
+            preload_phowhisper,
+            settings.phowhisper_model_id,
+            settings.phowhisper_device,
+        )
+        logger.info("phowhisper_preload_complete model=%s", settings.phowhisper_model_id)
+    yield
+
+
 app = FastAPI(
     title="Vietnamese STT POC",
     version="0.1.0",
     description="A browser-testable Vietnamese Speech-to-Text proof of concept.",
+    lifespan=lifespan,
 )
+
+
 class DynamicCORSMiddleware(CORSMiddleware):
     """CORS middleware that dynamically looks up allowed origins from current settings."""
 

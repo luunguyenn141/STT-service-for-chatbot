@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     stt_keyterms: str = ""
     phowhisper_model_id: str = "vinai/PhoWhisper-base"
     phowhisper_device: int = -1
+    phowhisper_preload: bool = False
     max_upload_mb: int = 25
     request_timeout_seconds: float = 60.0
     service_api_key: SecretStr | None = None

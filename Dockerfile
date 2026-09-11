@@ -19,9 +19,11 @@ COPY requirements.txt requirements-phowhisper.txt ./
 
 # Build argument: set to "true" to include local PhoWhisper dependencies (PyTorch, Transformers)
 ARG INSTALL_PHOWHISPER=false
+ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt && \
     if [ "$INSTALL_PHOWHISPER" = "true" ]; then \
+        pip install "torch>=2.2,<3" --index-url "$PYTORCH_INDEX_URL" && \
         pip install -r requirements-phowhisper.txt; \
     fi
 

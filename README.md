@@ -220,3 +220,85 @@ Run unit & integration tests (runs in < 1 second with no external dependencies o
 ```powershell
 pytest
 ```
+
+---
+
+## Deploy on GreenNode
+
+The GreenNode production profile runs `vinai/PhoWhisper-base` locally on an
+NVIDIA GPU. Audio never leaves this service for transcription, and no
+ElevenLabs account or API key is required. The dedicated Compose profile in
+[`deploy/greennode`](deploy/greennode) gives the container one GPU, persists the
+Hugging Face model cache, publishes FastAPI on host port 8080, and provisions
+an additional HTTPS endpoint through Caddy on ports 80/443.
+
+### 1. Provision the GreenNode resources
+
+Create a GreenNode GPU vServer using an Ubuntu NVIDIA/CUDA image with a Floating
+IP. An RTX 4090 (24 GB) is the cost-conscious GreenNode option for this
+single-model inference service. Use at least 4 vCPU, 16 GB RAM, and a 50 GB boot
+volume so the CUDA-enabled PyTorch image and model cache have enough room.
+Attach a security group with these inbound rules:
+
+| Protocol | Port | Source | Purpose |
+| --- | ---: | --- | --- |
+| TCP | 22 | Your administrator IP only | SSH |
+| TCP | 80 | `0.0.0.0/0` | ACME challenge and HTTPS redirect |
+| TCP | 443 | `0.0.0.0/0` | HTTPS API |
+| UDP | 443 | `0.0.0.0/0` | HTTP/3 (optional) |
+| TCP | 8080 | Your test-client IP `/32` | Direct HTTP API (testing only) |
+
+Do not expose container port 8000. GreenNode host port 8080 maps to it. Restrict
+8080 to trusted test-client IPs because it uses unencrypted HTTP; use the HTTPS
+domain for production audio and credentials. Create a DNS `A` record such as
+`stt.example.com` pointing to the Floating IP before starting Caddy.
+
+### 2. Install and deploy
+
+SSH to the vServer, then run:
+
+```bash
+git clone https://github.com/luunguyenn141/STT-service-for-chatbot.git
+cd STT-service-for-chatbot
+sudo bash ./deploy/greennode/bootstrap-ubuntu.sh
+```
+
+Log out and back in once so the Docker group takes effect, then:
+
+```bash
+cd STT-service-for-chatbot/deploy/greennode
+cp .env.production.example .env.production
+chmod 600 .env.production
+openssl rand -hex 32
+```
+
+Put the generated token in `SERVICE_API_KEY`, set `DOMAIN` and `ACME_EMAIL`,
+then deploy. The first run builds the CUDA-enabled image, downloads PhoWhisper,
+and waits until the model is loaded before reporting success:
+
+```bash
+bash ./deploy.sh
+curl https://YOUR_DOMAIN/health
+curl http://GREENNODE_FLOATING_IP:8080/health
+```
+
+For subsequent releases:
+
+```bash
+git pull --ff-only
+bash ./deploy/greennode/deploy.sh
+```
+
+Useful operations:
+
+```bash
+cd deploy/greennode
+docker compose --env-file .env.production logs -f --tail=100
+docker compose --env-file .env.production ps
+docker compose --env-file .env.production restart stt-service
+```
+
+The populated `.env.production` is ignored by Git and must remain only on the
+server. For a browser client, call the HTTPS endpoint and send
+`Authorization: Bearer <SERVICE_API_KEY>`; CORS is automatically restricted to
+the deployed domain.
