@@ -15,7 +15,7 @@ services:
       ALLOWED_ORIGINS: https://${DOMAIN:?Set DOMAIN in .env.production}
     gpus: all
     ports:
-      - "${DIRECT_HTTP_PORT:-8080}:8000"
+      - "${DIRECT_HTTP_PORT:-8080}:8080"
     networks:
       - backend
     read_only: true
@@ -31,7 +31,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

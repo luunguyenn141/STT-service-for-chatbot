@@ -114,7 +114,7 @@ docker compose up -d
 docker compose logs -f
 
 # Check health
-curl http://localhost:8000/health
+curl http://localhost:8080/health
 ```
 
 ---
@@ -171,6 +171,32 @@ The conversational agent only needs `response["text"]` to feed into intent class
 
 ---
 
+## Run PhoWhisper without a first-request download
+
+Bundle the pinned `vinai/PhoWhisper-base` model into the image at build time:
+
+```powershell
+docker build --build-arg INSTALL_PHOWHISPER=true --build-arg BUNDLE_PHOWHISPER_MODEL=true -t msb-stt:bundled .
+docker run --rm -p 18080:8080 --env-file .env -e STT_PROVIDER=phowhisper -e PHOWHISPER_DEVICE=-1 -e PHOWHISPER_PRELOAD=true -e HF_HUB_OFFLINE=1 msb-stt:bundled
+```
+
+Open `http://localhost:18080` after the application reports startup complete.
+The image includes about 295 MB of model files under `/opt/models/phowhisper`,
+outside the optional writable Hugging Face cache volume. The API continues to
+report the public model ID. A different `PHOWHISPER_MODEL_ID` uses normal Hub
+loading and requires its own cached model when offline mode is enabled.
+
+`PHOWHISPER_PRELOAD=true` loads weights into memory before the server accepts
+requests. Startup still takes a few seconds, and a new host must pull the larger
+image, but the first user request no longer downloads weights. The model revision
+can be changed explicitly with the `PHOWHISPER_BUNDLE_REVISION` build argument.
+The bundle option defaults to `false` for existing lightweight builds.
+
+For AgentBase, deploy the bundled image with `STT_PROVIDER=phowhisper`,
+`PHOWHISPER_MODEL_ID=vinai/PhoWhisper-base`, `PHOWHISPER_DEVICE=-1`,
+`PHOWHISPER_PRELOAD=true`, and `HF_HUB_OFFLINE=1`. Allow startup health checks
+enough time for imports and loading the model into memory.
+
 ## Chatbot Agent Integration Examples
 
 ### Python (Chatbot Backend using `httpx`)
@@ -179,7 +205,7 @@ The conversational agent only needs `response["text"]` to feed into intent class
 import httpx
 
 async def transcribe_voice_message(audio_bytes: bytes, filename: str = "voice.wav") -> str:
-    url = "http://stt-service:8000/api/v1/transcriptions"
+    url = "http://stt-service:8080/api/v1/transcriptions"
     headers = {"Authorization": "Bearer your_secure_microservice_token"}
     files = {"audio": (filename, audio_bytes, "audio/wav")}
 
@@ -200,7 +226,7 @@ async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
   const form = new FormData();
   form.append('audio', audioBuffer, { filename: 'voice.wav', contentType: 'audio/wav' });
 
-  const response = await axios.post('http://stt-service:8000/api/v1/transcriptions', form, {
+  const response = await axios.post('http://stt-service:8080/api/v1/transcriptions', form, {
     headers: {
       ...form.getHeaders(),
       Authorization: 'Bearer your_secure_microservice_token',
@@ -222,6 +248,74 @@ pytest
 ```
 
 ---
+
+## CI/CD: publish images to GreenNode VCR
+
+The GitHub Actions workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+tests Python 3.11 and 3.12 before building a Linux AMD64 image with PhoWhisper
+dependencies and the pinned model bundled into it.
+
+| Event | Automated behavior |
+| --- | --- |
+| PR opened, updated, or reopened targeting `main` | Run tests and build the production image; no registry login or image push. Fork PRs do not need registry secrets. |
+| Push to `main`, including a merged PR | Run tests, build, and push the image to VCR with `latest` and the full Git commit SHA as tags. |
+| Actions **Run workflow** on `main` | Run the same test/build/publish pipeline manually. Other branches only validate. |
+
+### One-time GitHub and VCR setup
+
+1. In the **STT repository**, open **Settings > Secrets and variables > Actions**
+   and add repository secrets `VCR_USERNAME` and `VCR_PASSWORD`. Use a VCR
+   repository user with push access to the destination repository. PFM uses these
+   same secret names, but its GitHub repository secrets are not automatically
+   available to STT. Never commit the credentials.
+2. The default image is `vcr.vngcloud.vn/111480-abp114564/stt-service`, using
+   PFM's VCR repository and a separate image name. Confirm that destination is
+   correct and the repository user can push there. To change it, set the Actions
+   **variable** `VCR_IMAGE` to `vcr.vngcloud.vn/<repository>/<image>` without a
+   tag or digest. VCR uses the full image path for Docker pushes; see the
+   [VNG image management documentation](https://docs.vngcloud.vn/vng-cloud-document/vcontainer-registry/repository/manage-image).
+3. The default build uses CPU PyTorch for AgentBase. For an NVIDIA GPU vServer,
+   set the optional Actions variable `STT_PYTORCH_INDEX_URL` to
+   `https://download.pytorch.org/whl/cu126` and configure GPU access at runtime.
+   Changing this variable changes the contents of the same image tags; use a
+   separate `VCR_IMAGE` if you need to retain separate CPU and GPU images.
+4. Commit the workflow together with all required image sources, including
+   `Dockerfile` and `deploy/bundle_phowhisper.py`. The bundling script must be
+   tracked in Git; a file present only on a developer's machine will not exist
+   in the Actions checkout. Push to `main` or merge the PR, then check
+   **Actions > CI/CD Pipeline** for the published image.
+
+The build downloads dependencies and the pinned public Hugging Face model, so
+the first build needs internet access and takes longer. Later builds reuse the
+GitHub Actions Docker layer cache. A failed test or build prevents publishing.
+
+### Use the published image
+
+Configure the GreenNode/AgentBase service to pull
+`vcr.vngcloud.vn/111480-abp114564/stt-service:latest` (or your `VCR_IMAGE` path).
+For reproducible releases and rollback, select the full commit SHA tag instead.
+Give the platform registry pull credentials if the VCR repository is private.
+
+The bundled CPU image listens on port `8080`. Configure its runtime environment:
+
+```dotenv
+STT_PROVIDER=phowhisper
+PHOWHISPER_MODEL_ID=vinai/PhoWhisper-base
+PHOWHISPER_DEVICE=-1
+PHOWHISPER_PRELOAD=true
+HF_HUB_OFFLINE=1
+SERVICE_API_KEY=replace_with_a_strong_secret
+```
+
+Allow enough startup time for model imports/loading before probing `/health`.
+Use `PHOWHISPER_DEVICE=0` and expose a GPU for the CUDA image.
+
+This workflow automatically **publishes images**, matching PFM's workflow.
+It does not call a GreenNode/AgentBase redeployment API or restart a running
+service. Configure the platform's image-update trigger if it supports one, or
+redeploy with the new SHA tag. Publishing `latest` alone does not instruct an
+already-running container to restart. The vServer Compose/deploy instructions
+below still build from source on the server; they do not consume the CI image.
 
 ## Deploy on GreenNode
 
@@ -248,8 +342,8 @@ Attach a security group with these inbound rules:
 | UDP | 443 | `0.0.0.0/0` | HTTP/3 (optional) |
 | TCP | 8080 | Your test-client IP `/32` | Direct HTTP API (testing only) |
 
-Do not expose container port 8000. GreenNode host port 8080 maps to it. Restrict
-8080 to trusted test-client IPs because it uses unencrypted HTTP; use the HTTPS
+The container listens on port 8080, matching the AgentBase runtime requirement.
+For vServer deployments, restrict host port 8080 to trusted test-client IPs because it uses unencrypted HTTP; use the HTTPS
 domain for production audio and credentials. Create a DNS `A` record such as
 `stt.example.com` pointing to the Floating IP before starting Caddy.
 

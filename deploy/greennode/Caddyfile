@@ -6,7 +6,7 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	reverse_proxy stt-service:8000 {
+	reverse_proxy stt-service:8080 {
 		health_uri /health
 		health_interval 30s
 		health_timeout 5s

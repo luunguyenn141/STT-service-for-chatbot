@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.services.stt.base import ProviderNoSpeech, ProviderUnavailable
-from app.services.stt.phowhisper import PhoWhisperSTTProvider
+from app.services.stt.phowhisper import PhoWhisperSTTProvider, _model_source
+
+
+def test_matching_bundled_model_uses_local_directory(monkeypatch, tmp_path):
+    (tmp_path / "bundle.json").write_text(json.dumps({"model_id": "vinai/PhoWhisper-base"}))
+    monkeypatch.setenv("PHOWHISPER_BUNDLE_DIR", str(tmp_path))
+    assert _model_source("vinai/PhoWhisper-base") == str(tmp_path)
+
+
+def test_bundled_model_does_not_override_a_different_model(monkeypatch, tmp_path):
+    (tmp_path / "bundle.json").write_text(json.dumps({"model_id": "vinai/PhoWhisper-base"}))
+    monkeypatch.setenv("PHOWHISPER_BUNDLE_DIR", str(tmp_path))
+    assert _model_source("vinai/PhoWhisper-small") == "vinai/PhoWhisper-small"
+
+
+def test_image_without_bundle_keeps_normal_model_loading(monkeypatch, tmp_path):
+    monkeypatch.setenv("PHOWHISPER_BUNDLE_DIR", str(tmp_path))
+    assert _model_source("vinai/PhoWhisper-base") == "vinai/PhoWhisper-base"
 
 
 @pytest.mark.asyncio

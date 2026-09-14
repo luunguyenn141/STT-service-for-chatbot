@@ -27,6 +27,17 @@ RUN pip install --upgrade pip && \
         pip install -r requirements-phowhisper.txt; \
     fi
 
+# Optionally bundle a pinned model outside the writable runtime cache so that
+# mounting a fresh cache volume cannot hide the model shipped in the image.
+ARG BUNDLE_PHOWHISPER_MODEL=false
+ARG PHOWHISPER_BUNDLE_REVISION=7ebdb9e88f5cc5271fb88f4d642c82ff9388650e
+COPY deploy/bundle_phowhisper.py /tmp/bundle_phowhisper.py
+RUN if [ "$BUNDLE_PHOWHISPER_MODEL" = "true" ]; then \
+        test "$INSTALL_PHOWHISPER" = "true" && \
+        python /tmp/bundle_phowhisper.py "$PHOWHISPER_BUNDLE_REVISION"; \
+    fi
+ENV PHOWHISPER_BUNDLE_DIR=/opt/models/phowhisper
+
 # Copy application files
 COPY app/ ./app/
 COPY README.md .env.example ./
@@ -38,9 +49,9 @@ RUN useradd -u 10001 -m -s /bin/bash appuser && \
 
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

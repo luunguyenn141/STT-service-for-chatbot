@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 from collections.abc import Callable
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from app.services.stt.base import (
@@ -79,10 +82,23 @@ class PhoWhisperSTTProvider(STTProvider):
 @lru_cache(maxsize=4)
 def _load_pipeline(model_id: str, device: int) -> Pipeline:
     """Load and retain a Transformers ASR pipeline for the selected runtime."""
+    import torch
     from transformers import pipeline
 
     return pipeline(
         task="automatic-speech-recognition",
-        model=model_id,
+        model=_model_source(model_id),
         device=device,
     )
+
+
+def _model_source(model_id: str) -> str:
+    """Use bundled weights only when they match the configured public model ID."""
+    bundle_dir = os.environ.get("PHOWHISPER_BUNDLE_DIR")
+    if bundle_dir:
+        manifest = Path(bundle_dir) / "bundle.json"
+        if manifest.is_file():
+            bundle = json.loads(manifest.read_text(encoding="utf-8"))
+            if bundle["model_id"] == model_id:
+                return str(Path(bundle_dir))
+    return model_id
