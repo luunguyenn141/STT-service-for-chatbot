@@ -199,6 +199,54 @@ enough time for imports and loading the model into memory.
 
 ## Chatbot Agent Integration Examples
 
+### Streaming microphone input (PFM / M-Your)
+
+Streaming uses a short-lived ticket and a bidirectional WebSocket:
+
+1. Chatbot backend calls `POST /api/v1/stream-sessions` with the service key
+   (`x-api-key` or Bearer) and JSON `{"origin":"https://your-chatbot.example.com"}`.
+2. Pass the returned `token` to the browser. It expires after 60 seconds and is
+   bound to that Origin. Keep the service key on the chatbot backend.
+3. Browser connects to `wss://<endpoint>/api/v1/transcriptions/stream` and sends
+   `{"type":"start","token":"<ticket>"}` as its first message.
+4. After `ready`, send **binary PCM16 little-endian, mono, 16 kHz** audio at live
+   microphone speed. Recommended packet: 100 ms (3,200 bytes), maximum 500 ms.
+5. Consume `{"type":"partial","text":"..."}` by **replacing** the draft, not
+   appending. Each hypothesis describes the entire utterance so far.
+6. Flush any remaining audio before `{"type":"stop"}`. A 900 ms pause also ends
+   the utterance automatically. `finishing` means stop microphone capture;
+   `final` contains the final text and `reason` (`stop`, `silence`, `max_duration`).
+   The server then closes the connection. Start a new session for a new utterance.
+
+Requires `STT_PROVIDER=phowhisper` and an updated image. PhoWhisper runs repeated
+inference on accumulated audio; this is near-real-time transcription, not a native
+streaming decoder. The default partial interval is 1 second of new audio, subject
+to inference time. Pending partials coalesce; final processing uses all accepted
+audio including the last short packet. HTTP file transcription remains available.
+
+`STREAM_MAX_SESSIONS=2` limits active streams per process. Inference is serialized
+with HTTP requests because the cached model is shared. `STREAM_MAX_AUDIO_SECONDS=20`
+caps an utterance; total input including initial silence is capped at 30 seconds.
+`STREAM_VAD_THRESHOLD=0.012` is an energy-based detector with 200 ms pre-roll/minimum
+voiced audio. Tune it for noisy/quiet microphones. See `.env.example` for controls.
+
+Tickets use `SERVICE_API_KEY` for signing, or `STREAM_TOKEN_SECRET` if set. Use the
+same secret across workers/replicas; without either, tickets only work in the
+issuing process (development). They are origin-bound bearer credentials, reusable
+until expiration; authenticate users at your chatbot backend before issuing them.
+Gateway must preserve Upgrade/Origin and allow connections for at least 180 seconds.
+No browser CORS permission is needed for server-to-server ticket creation.
+
+After deployment, verify the public gateway (silence test, no inference):
+
+```powershell
+python scripts/check_streaming.py --base-url https://<endpoint> --origin https://<chatbot-origin>
+```
+
+The script reads `SERVICE_API_KEY` from the environment. Add `--wav sample.wav`
+with PCM16 mono 16 kHz speech to inspect partial/final timing using the real model.
+PFM's companion `docs/STT-STREAMING.md` describes its mic UI and runtime settings.
+
 ### Python (Chatbot Backend using `httpx`)
 
 ```python

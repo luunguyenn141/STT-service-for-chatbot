@@ -7,6 +7,7 @@ from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from threading import Lock
 
 from app.services.stt.base import (
     ProviderError,
@@ -19,6 +20,10 @@ from app.services.stt.base import (
 
 Pipeline = Callable[[bytes], dict[str, Any]]
 PipelineLoader = Callable[[str, int], Pipeline]
+# The cached Transformers pipeline is shared by HTTP and WebSocket sessions.
+# Keep the lock inside the worker thread so cancelling an await never permits
+# a second inference while the first GPU operation is still running.
+_inference_lock = Lock()
 
 
 def preload_phowhisper(model_id: str, device: int) -> None:
@@ -76,7 +81,8 @@ class PhoWhisperSTTProvider(STTProvider):
         return ProviderTranscription(text=text.strip(), language_code="vie")
 
     def _transcribe_sync(self, audio_bytes: bytes) -> dict[str, Any]:
-        return self._pipeline_loader(self._model_id, self._device)(audio_bytes)
+        with _inference_lock:
+            return self._pipeline_loader(self._model_id, self._device)(audio_bytes)
 
 
 @lru_cache(maxsize=4)

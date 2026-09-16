@@ -15,6 +15,7 @@ from starlette.formparsers import MultiPartParser
 
 from app.api.health import router as health_router
 from app.api.transcriptions import router as transcription_router
+from app.api.streaming import router as streaming_router
 from app.config import get_settings
 from app.services.stt.phowhisper import preload_phowhisper
 
@@ -74,6 +75,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.include_router(health_router)
 app.include_router(transcription_router)
+app.include_router(streaming_router)
 
 
 @app.middleware("http")

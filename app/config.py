@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SUPPORTED_STT_PROVIDERS = frozenset({"elevenlabs", "phowhisper"})
@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     service_api_key: SecretStr | None = None
     rate_limit_per_minute: int = 60
     allowed_origins: str = "http://localhost:8000"
+    stream_token_secret: SecretStr | None = None
+    stream_max_sessions: int = Field(default=2, ge=1, le=32)
+    stream_partial_seconds: float = Field(default=1.0, ge=0.5, le=5)
+    stream_silence_ms: int = Field(default=900, ge=400, le=3000)
+    stream_max_audio_seconds: int = Field(default=20, ge=5, le=30)
+    stream_vad_threshold: float = Field(default=0.012, gt=0, lt=1)
 
     @field_validator("rate_limit_per_minute")
     @classmethod
