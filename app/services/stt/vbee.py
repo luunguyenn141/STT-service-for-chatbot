@@ -27,7 +27,7 @@ POLL_INTERVAL_SECONDS = 2.0
 
 
 class VbeeSTTProvider(STTProvider):
-    """Vbee batch STT adapter that polls until the complete transcript is ready."""
+    """Vbee STT adapter using sync for short audio and batch polling for longer audio."""
 
     def __init__(
         self,
@@ -59,7 +59,8 @@ class VbeeSTTProvider(STTProvider):
         del filename, content_type, language, keyterms
 
         deadline = time.monotonic() + self._timeout_seconds
-        wav_bytes, _duration = await self._to_wav(audio_bytes, deadline)
+        wav_bytes, duration = await self._to_wav(audio_bytes, deadline)
+        mode = "sync" if duration < 10 else "async"
         headers = {
             "Authorization": f"Bearer {self._api_token}",
             "App-Id": self._app_id,
@@ -72,9 +73,7 @@ class VbeeSTTProvider(STTProvider):
                 VBEE_STT_ENDPOINT,
                 headers=headers,
                 files={"audioContent": ("recording.wav", wav_bytes, "audio/wav")},
-                # The Vbee application used by PFM has batch STT entitlement
-                # (`stt-async`) but not the separate `stt-sync` feature.
-                data={"mode": "async"},
+                data={"mode": mode},
                 deadline=deadline,
             )
             while payload.get("status") in {"PENDING", "PROCESSING"}:

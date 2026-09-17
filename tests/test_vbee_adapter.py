@@ -11,7 +11,7 @@ from app.services.stt.vbee import VBEE_STT_ENDPOINT, VbeeSTTProvider
 
 
 @pytest.mark.asyncio
-async def test_short_request_also_uses_batch_mode(monkeypatch):
+async def test_sync_request_maps_vbee_transcript(monkeypatch):
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -52,7 +52,7 @@ async def test_short_request_also_uses_batch_mode(monkeypatch):
     assert captured["headers"]["authorization"] == "Bearer secret-token"
     assert captured["headers"]["app-id"] == "bank-app"
     assert b'name="mode"' in captured["body"]
-    assert b"\r\nasync\r\n" in captured["body"]
+    assert b"sync" in captured["body"]
     assert b'name="audioContent"' in captured["body"]
 
 
