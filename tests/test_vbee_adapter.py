@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
+import wave
+
 import httpx
 import pytest
 
@@ -141,3 +144,24 @@ async def test_vbee_bad_request_is_reported_as_invalid_audio(monkeypatch):
             language="vie",
             keyterms=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_canonical_pfm_wav_skips_ffmpeg(monkeypatch):
+    with BytesIO() as output:
+        with wave.open(output, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16_000)
+            wav.writeframes(b"\x00\x00" * 8_000)
+        source = output.getvalue()
+
+    async def unexpected_ffmpeg(*_args, **_kwargs):
+        raise AssertionError("canonical WAV must not start ffmpeg")
+
+    monkeypatch.setattr("app.services.stt.vbee.asyncio.create_subprocess_exec", unexpected_ffmpeg)
+    provider = VbeeSTTProvider(api_token="token", app_id="app-id", timeout_seconds=5)
+    converted, duration = await provider._to_wav(source, float("inf"))
+
+    assert converted is source
+    assert duration == 0.5

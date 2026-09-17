@@ -101,6 +101,12 @@ class VbeeSTTProvider(STTProvider):
         return ProviderTranscription(text=transcript.strip(), language_code="vie")
 
     async def _to_wav(self, audio_bytes: bytes, deadline: float) -> tuple[bytes, float]:
+        # PFM already records canonical 16 kHz mono PCM WAV. Forward it as-is to
+        # avoid starting ffmpeg on every request; keep ffmpeg for other clients.
+        canonical = _canonical_wav(audio_bytes)
+        if canonical is not None:
+            return canonical
+
         try:
             process = await asyncio.create_subprocess_exec(
                 "ffmpeg",
@@ -187,3 +193,23 @@ def _remaining(deadline: float) -> float:
     if remaining <= 0:
         raise ProviderTimeout
     return remaining
+
+
+def _canonical_wav(audio_bytes: bytes) -> tuple[bytes, float] | None:
+    if not audio_bytes or len(audio_bytes) >= MAX_PCM_BYTES + 44:
+        return None
+    try:
+        with wave.open(BytesIO(audio_bytes), "rb") as wav:
+            if (
+                wav.getnchannels() != 1
+                or wav.getsampwidth() != 2
+                or wav.getframerate() != SAMPLE_RATE
+                or wav.getcomptype() != "NONE"
+            ):
+                return None
+            frame_count = wav.getnframes()
+            if frame_count <= 0 or len(wav.readframes(frame_count)) != frame_count * 2:
+                return None
+    except (EOFError, wave.Error):
+        return None
+    return audio_bytes, frame_count / SAMPLE_RATE

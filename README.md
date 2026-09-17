@@ -59,7 +59,7 @@ SERVICE_API_KEY=replace_with_a_strong_service_secret
 
 The public microservice endpoint stays `POST /api/v1/transcriptions`. The adapter:
 
-- converts supported uploads to mono WAV at 16 kHz because Vbee STT accepts WAV;
+- forwards valid 16 kHz mono PCM WAV directly to Vbee and converts other supported uploads with ffmpeg;
 - uses Vbee sync mode for audio shorter than 10 seconds;
 - uses async mode and polls the transcript endpoint every 2 seconds for longer audio;
 - keeps Vbee credentials on the server and never returns them to callers.
