@@ -8,6 +8,7 @@ import wave
 import httpx
 
 from app.services.stt.base import (
+    ProviderAuthenticationFailed,
     ProviderInvalidAudio,
     ProviderNoSpeech,
     ProviderRateLimited,
@@ -36,7 +37,10 @@ class VbeeSTTProvider(STTProvider):
         timeout_seconds: float,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._api_token = api_token
+        token = api_token.strip()
+        # Accept either the raw JWT or a value copied from an Authorization
+        # header. The request itself adds exactly one Bearer prefix.
+        self._api_token = token[7:].strip() if token.lower().startswith("bearer ") else token
         self._app_id = app_id
         self._timeout_seconds = timeout_seconds
         self._transport = transport
@@ -173,7 +177,9 @@ class VbeeSTTProvider(STTProvider):
 
         if response.status_code == 429:
             raise ProviderRateLimited
-        if response.status_code in {401, 403} or response.status_code >= 500:
+        if response.status_code in {401, 403}:
+            raise ProviderAuthenticationFailed
+        if response.status_code >= 500:
             raise ProviderUnavailable
         if response.status_code == 400:
             raise ProviderInvalidAudio

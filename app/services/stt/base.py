@@ -51,6 +51,10 @@ class ProviderRateLimited(ProviderError):
     pass
 
 
+class ProviderAuthenticationFailed(ProviderError):
+    pass
+
+
 class ProviderUnavailable(ProviderError):
     pass
 

@@ -17,6 +17,7 @@ from app.config import Settings, get_settings
 from app.models import TranscriptionResponse, WordTiming
 from app.services.rate_limiter import rate_limiter
 from app.services.stt.base import (
+    ProviderAuthenticationFailed,
     ProviderError,
     ProviderInvalidAudio,
     ProviderNoSpeech,
@@ -191,6 +192,19 @@ async def create_transcription(request: Request):
             settings.stt_provider,
         )
         return _error(429, "provider_rate_limited", "The transcription provider is busy. Try again shortly.", request_id)
+    except ProviderAuthenticationFailed:
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_authentication_failed",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
+        return _error(
+            502,
+            "provider_authentication_failed",
+            "The transcription provider rejected its credentials.",
+            request_id,
+        )
     except ProviderTimeout:
         logger.warning(
             "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_timeout",

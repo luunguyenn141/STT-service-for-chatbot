@@ -6,7 +6,7 @@ import wave
 import httpx
 import pytest
 
-from app.services.stt.base import ProviderInvalidAudio, ProviderRateLimited
+from app.services.stt.base import ProviderAuthenticationFailed, ProviderInvalidAudio, ProviderRateLimited
 from app.services.stt.vbee import VBEE_STT_ENDPOINT, VbeeSTTProvider
 
 
@@ -121,6 +121,37 @@ async def test_vbee_rate_limit_is_mapped(monkeypatch):
             language="vie",
             keyterms=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_vbee_auth_failure_is_distinct_and_bearer_prefix_is_normalized(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["authorization"] = request.headers["authorization"]
+        return httpx.Response(401)
+
+    provider = VbeeSTTProvider(
+        api_token="Bearer token",
+        app_id="app-id",
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+    )
+
+    async def fake_wav(_: bytes, __: float) -> tuple[bytes, float]:
+        return b"wav-data", 1.0
+
+    monkeypatch.setattr(provider, "_to_wav", fake_wav)
+    with pytest.raises(ProviderAuthenticationFailed):
+        await provider.transcribe(
+            audio_bytes=b"audio",
+            filename="voice.wav",
+            content_type="audio/wav",
+            language="vie",
+            keyterms=[],
+        )
+
+    assert captured["authorization"] == "Bearer token"
 
 
 @pytest.mark.asyncio
