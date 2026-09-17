@@ -38,8 +38,6 @@ async def create_session(body: SessionRequest, request: Request):
     settings = get_settings()
     if not _is_authenticated(request, settings):
         raise HTTPException(401, "Invalid or missing service API key.")
-    if settings.stt_provider != "phowhisper":
-        raise HTTPException(503, "Streaming requires STT_PROVIDER=phowhisper.")
     peer = request.client.host if request.client else "unknown"
     allowed, _, _ = rate_limiter.is_allowed(f"stream-ticket:{peer}", limit=30)
     if not allowed:
@@ -77,9 +75,6 @@ async def stream_transcription(ws: WebSocket):
         return
     except WebSocketDisconnect:
         return
-    if settings.stt_provider != "phowhisper":
-        await _error(ws, "provider_not_configured", "Dịch vụ chưa bật PhoWhisper.")
-        return
     if _active_sessions >= settings.stream_max_sessions:
         await _error(ws, "busy", "Dịch vụ đang bận. Vui lòng thử lại.", 1013)
         return
@@ -116,7 +111,8 @@ async def stream_transcription(ws: WebSocket):
                 return
             if buffer.has_speech and len(buffer.audio) - last_partial_size >= settings.stream_partial_seconds * SAMPLE_RATE * 2:
                 last_partial_size = len(buffer.audio)
-                changed.set()
+                if settings.stt_provider == "phowhisper":
+                    changed.set()
 
     async def recognize():
         previous = ""
