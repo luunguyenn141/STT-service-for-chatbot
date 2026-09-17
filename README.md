@@ -1,6 +1,6 @@
 # Vietnamese Speech-to-Text Microservice for Banking Chatbot
 
-A high-performance Vietnamese Speech-to-Text (STT) microservice built with FastAPI and powered by **ElevenLabs Scribe v2**, designed to integrate seamlessly into a Personal Financial Management (PFM) chatbot for banking mobile apps.
+A Vietnamese Speech-to-Text (STT) microservice built with FastAPI and pluggable **Vbee**, **ElevenLabs**, and **PhoWhisper** providers, designed to integrate with a Personal Financial Management (PFM) chatbot for banking mobile apps.
 
 It provides a secure, low-latency REST API that converts customer voice recordings into clean text that conversational AI agents can understand and process.
 
@@ -16,11 +16,14 @@ flowchart LR
         API["POST /api/v1/transcriptions\n(Auth + Rate Limit + Audit)"]
         Builder["Provider Adapter"]
         EL["ElevenLabs Scribe v2\n(Cloud API + Keyterm Biasing)"]
+        VB["Vbee STT\n(Vietnamese Cloud API)"]
         API --> Builder
         Builder -->|STT_PROVIDER=elevenlabs| EL
+        Builder -->|STT_PROVIDER=vbee| VB
     end
     Chatbot -->|POST audio + Bearer Token| API
     EL -->|Fast cloud transcription| API
+    VB -->|Vietnamese transcript| API
     API -->|{ text: 'Chuyển 500k cho Nam' }| Chatbot
     Chatbot -->|Executes intent & responds| MobileApp
 ```
@@ -39,6 +42,39 @@ flowchart LR
    - Returns word-level timestamps, speaker separation, and confidence log probabilities in addition to the transcript text.
 
 *(Note: VinAI PhoWhisper local adapter remains implemented as an optional fallback if on-prem inference is ever required).*
+
+---
+
+## Test with Vbee STT
+
+Create an application at [Vbee Studio](https://studio.vbee.vn/apps), then configure the service:
+
+```dotenv
+STT_PROVIDER=vbee
+VBEE_API_TOKEN=replace_with_the_vbee_jwt
+VBEE_APP_ID=replace_with_the_vbee_app_id
+REQUEST_TIMEOUT_SECONDS=120
+SERVICE_API_KEY=replace_with_a_strong_service_secret
+```
+
+The public microservice endpoint stays `POST /api/v1/transcriptions`. The adapter:
+
+- converts supported uploads to mono WAV at 16 kHz because Vbee STT accepts WAV;
+- uses Vbee sync mode for audio shorter than 10 seconds;
+- uses async mode and polls the transcript endpoint every 2 seconds for longer audio;
+- keeps Vbee credentials on the server and never returns them to callers.
+
+Vbee currently documents utterance timestamps rather than word timestamps, so
+the normalized `words` array is empty for this provider. The request `keyterms`
+field is accepted by this service but ignored because the Vbee STT API does not
+document a keyterm parameter.
+
+Run a lightweight Vbee image locally:
+
+```powershell
+docker build --build-arg DEFAULT_STT_PROVIDER=vbee -t msb-stt:vbee .
+docker run --rm -p 18080:8080 --env-file .env msb-stt:vbee
+```
 
 ---
 
@@ -300,13 +336,15 @@ pytest
 ## CI/CD: publish images to GreenNode VCR
 
 The GitHub Actions workflow in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-tests Python 3.11 and 3.12 before building a Linux AMD64 image with PhoWhisper
-dependencies and the pinned model bundled into it.
+tests Python 3.11 and 3.12 before building two isolated Linux AMD64 images:
+
+- `stt-service`: the existing image with PhoWhisper dependencies and bundled model;
+- `stt-service-vbee`: a smaller image whose default provider is Vbee and whose credentials are supplied only at runtime.
 
 | Event | Automated behavior |
 | --- | --- |
-| PR opened, updated, or reopened targeting `main` | Run tests and build the production image; no registry login or image push. Fork PRs do not need registry secrets. |
-| Push to `main`, including a merged PR | Run tests, build, and push the image to VCR with `latest` and the full Git commit SHA as tags. |
+| PR opened, updated, or reopened targeting `main` | Run tests and build both images; no registry login or image push. Fork PRs do not need registry secrets. |
+| Push to `main`, including a merged PR | Run tests, build, and push both images to VCR with `latest` and the full Git commit SHA as tags. |
 | Actions **Run workflow** on `main` | Run the same test/build/publish pipeline manually. Other branches only validate. |
 
 ### One-time GitHub and VCR setup
@@ -316,11 +354,13 @@ dependencies and the pinned model bundled into it.
    repository user with push access to the destination repository. PFM uses these
    same secret names, but its GitHub repository secrets are not automatically
    available to STT. Never commit the credentials.
-2. The default image is `vcr.vngcloud.vn/111480-abp114564/stt-service`, using
+2. The existing image is `vcr.vngcloud.vn/111480-abp114564/stt-service`, using
    PFM's VCR repository and a separate image name. Confirm that destination is
    correct and the repository user can push there. To change it, set the Actions
    **variable** `VCR_IMAGE` to `vcr.vngcloud.vn/<repository>/<image>` without a
-   tag or digest. VCR uses the full image path for Docker pushes; see the
+   tag or digest. The Vbee trial image defaults to
+   `vcr.vngcloud.vn/111480-abp114564/stt-service-vbee`; override it with the
+   **variable** `VCR_VBEE_IMAGE` using the same format. VCR uses the full image path for Docker pushes; see the
    [VNG image management documentation](https://docs.vngcloud.vn/vng-cloud-document/vcontainer-registry/repository/manage-image).
 3. The default build uses CPU PyTorch for AgentBase. For an NVIDIA GPU vServer,
    set the optional Actions variable `STT_PYTORCH_INDEX_URL` to
@@ -339,7 +379,23 @@ GitHub Actions Docker layer cache. A failed test or build prevents publishing.
 
 ### Use the published image
 
-Configure the GreenNode/AgentBase service to pull
+For the Vbee trial, deploy
+`vcr.vngcloud.vn/111480-abp114564/stt-service-vbee:latest`, or preferably its
+full commit SHA tag, and configure:
+
+```dotenv
+STT_PROVIDER=vbee
+VBEE_API_TOKEN=replace_with_the_vbee_jwt
+VBEE_APP_ID=replace_with_the_vbee_app_id
+REQUEST_TIMEOUT_SECONDS=120
+SERVICE_API_KEY=replace_with_a_strong_secret
+```
+
+The Vbee image defaults to `STT_PROVIDER=vbee`; setting it explicitly in VNG
+makes the deployment intent visible. Store `VBEE_API_TOKEN` as a runtime secret.
+Do not add it to the Docker build, GitHub Actions variables, or the repository.
+
+For PhoWhisper, configure the GreenNode/AgentBase service to pull
 `vcr.vngcloud.vn/111480-abp114564/stt-service:latest` (or your `VCR_IMAGE` path).
 For reproducible releases and rollback, select the full commit SHA tag instead.
 Give the platform registry pull credentials if the VCR repository is private.
