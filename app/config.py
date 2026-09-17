@@ -5,7 +5,7 @@ from functools import lru_cache
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-SUPPORTED_STT_PROVIDERS = frozenset({"elevenlabs", "phowhisper", "vbee"})
+SUPPORTED_STT_PROVIDERS = frozenset({"elevenlabs", "phowhisper"})
 
 
 class Settings(BaseSettings):
@@ -14,8 +14,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     elevenlabs_api_key: SecretStr | None = None
-    vbee_api_token: SecretStr | None = None
-    vbee_app_id: str = ""
     stt_provider: str = "elevenlabs"
     stt_model_id: str = "scribe_v2"
     stt_keyterms: str = ""
@@ -57,11 +55,6 @@ class Settings(BaseSettings):
             raise ValueError("A model ID must not be empty.")
         return value.strip()
 
-    @field_validator("vbee_app_id")
-    @classmethod
-    def normalize_vbee_app_id(cls, value: str) -> str:
-        return value.strip()
-
     @field_validator("phowhisper_device")
     @classmethod
     def validate_phowhisper_device(cls, value: int) -> int:
@@ -87,12 +80,6 @@ class Settings(BaseSettings):
     def configured(self) -> bool:
         if self.stt_provider == "phowhisper":
             return bool(self.phowhisper_model_id)
-        if self.stt_provider == "vbee":
-            return bool(
-                self.vbee_api_token
-                and self.vbee_api_token.get_secret_value().strip()
-                and self.vbee_app_id.strip()
-            )
         return self.elevenlabs_api_key is not None and bool(
             self.elevenlabs_api_key.get_secret_value().strip()
         )
@@ -101,8 +88,6 @@ class Settings(BaseSettings):
     def active_model_id(self) -> str:
         if self.stt_provider == "phowhisper":
             return self.phowhisper_model_id
-        if self.stt_provider == "vbee":
-            return "vbee-stt"
         return self.stt_model_id
 
     @property
