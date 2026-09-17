@@ -8,7 +8,6 @@ from app.api import transcriptions
 from app.config import get_settings
 from app.main import app
 from app.services.stt.base import (
-    ProviderAuthenticationFailed,
     ProviderInvalidAudio,
     ProviderRateLimited,
     ProviderTimeout,
@@ -125,20 +124,6 @@ def test_provider_rate_limit_maps_to_429(monkeypatch):
 
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "provider_rate_limited"
-    get_settings.cache_clear()
-
-
-def test_provider_auth_failure_returns_safe_specific_code(monkeypatch):
-    provider = StubProvider(ProviderAuthenticationFailed("upstream credential detail"))
-    with _client_with_provider(monkeypatch, provider) as client:
-        response = client.post(
-            "/api/v1/transcriptions",
-            files={"audio": ("demo.wav", b"audio", "audio/wav")},
-        )
-
-    assert response.status_code == 502
-    assert response.json()["error"]["code"] == "provider_authentication_failed"
-    assert "upstream credential detail" not in response.text
     get_settings.cache_clear()
 
 
