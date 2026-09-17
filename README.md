@@ -60,8 +60,8 @@ SERVICE_API_KEY=replace_with_a_strong_service_secret
 The public microservice endpoint stays `POST /api/v1/transcriptions`. The adapter:
 
 - forwards valid 16 kHz mono PCM WAV directly to Vbee and converts other supported uploads with ffmpeg;
-- sends complete recordings under 10 seconds through Vbee sync mode for low latency;
-- automatically falls back to async polling when the App ID lacks the separate `stt-sync` feature;
+- uses Vbee async batch mode for every recording and polls the transcript endpoint every 2 seconds;
+- does not require the separate Vbee `stt-sync` feature, including for short audio;
 - keeps Vbee credentials on the server and never returns them to callers.
 
 Vbee currently documents utterance timestamps rather than word timestamps, so

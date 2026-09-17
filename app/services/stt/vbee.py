@@ -26,12 +26,8 @@ MAX_PCM_BYTES = 94_000_000  # Leave room for the WAV header under Vbee's 100 MB 
 POLL_INTERVAL_SECONDS = 2.0
 
 
-class _SyncFeatureUnavailable(Exception):
-    pass
-
-
 class VbeeSTTProvider(STTProvider):
-    """Vbee adapter preferring low-latency full-audio sync with batch fallback."""
+    """Vbee batch STT adapter that polls until the complete transcript is ready."""
 
     def __init__(
         self,
@@ -63,21 +59,24 @@ class VbeeSTTProvider(STTProvider):
         del filename, content_type, language, keyterms
 
         deadline = time.monotonic() + self._timeout_seconds
-        wav_bytes, duration = await self._to_wav(audio_bytes, deadline)
+        wav_bytes, _duration = await self._to_wav(audio_bytes, deadline)
         headers = {
             "Authorization": f"Bearer {self._api_token}",
             "App-Id": self._app_id,
         }
 
         async with httpx.AsyncClient(transport=self._transport) as client:
-            mode = "sync" if duration < 10 else "async"
-            try:
-                payload = await self._submit(client, headers, wav_bytes, mode, deadline)
-            except _SyncFeatureUnavailable:
-                # Some Vbee applications only have `stt-async`. Preserve a
-                # working service while allowing `stt-sync` to take effect as
-                # soon as Vbee enables that feature for the same App ID.
-                payload = await self._submit(client, headers, wav_bytes, "async", deadline)
+            payload = await self._request(
+                client,
+                "POST",
+                VBEE_STT_ENDPOINT,
+                headers=headers,
+                files={"audioContent": ("recording.wav", wav_bytes, "audio/wav")},
+                # The Vbee application used by PFM has batch STT entitlement
+                # (`stt-async`) but not the separate `stt-sync` feature.
+                data={"mode": "async"},
+                deadline=deadline,
+            )
             while payload.get("status") in {"PENDING", "PROCESSING"}:
                 transcript_id = payload.get("transcriptId")
                 if not isinstance(transcript_id, str) or not transcript_id:
@@ -105,24 +104,6 @@ class VbeeSTTProvider(STTProvider):
             raise ProviderNoSpeech
         # Vbee documents utterance timestamps, not word-level timings.
         return ProviderTranscription(text=transcript.strip(), language_code="vie")
-
-    async def _submit(
-        self,
-        client: httpx.AsyncClient,
-        headers: dict[str, str],
-        wav_bytes: bytes,
-        mode: str,
-        deadline: float,
-    ) -> dict[str, object]:
-        return await self._request(
-            client,
-            "POST",
-            VBEE_STT_ENDPOINT,
-            headers=headers,
-            files={"audioContent": ("recording.wav", wav_bytes, "audio/wav")},
-            data={"mode": mode},
-            deadline=deadline,
-        )
 
     async def _to_wav(self, audio_bytes: bytes, deadline: float) -> tuple[bytes, float]:
         # PFM already records canonical 16 kHz mono PCM WAV. Forward it as-is to
@@ -197,8 +178,6 @@ class VbeeSTTProvider(STTProvider):
 
         if response.status_code == 429:
             raise ProviderRateLimited
-        if response.status_code == 403 and _missing_sync_feature(response):
-            raise _SyncFeatureUnavailable
         if response.status_code in {401, 403}:
             raise ProviderAuthenticationFailed
         if response.status_code >= 500:
@@ -214,17 +193,6 @@ class VbeeSTTProvider(STTProvider):
         if not isinstance(payload, dict):
             raise ProviderUnexpectedResponse
         return payload
-
-
-def _missing_sync_feature(response: httpx.Response) -> bool:
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    if not isinstance(payload, dict):
-        return False
-    error = payload.get("error")
-    return isinstance(error, dict) and "stt-sync" in str(error.get("message", "")).lower()
 
 
 def _remaining(deadline: float) -> float:
