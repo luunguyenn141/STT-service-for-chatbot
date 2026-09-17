@@ -1,13 +1,10 @@
 FROM python:3.11-slim
 
-ARG DEFAULT_STT_PROVIDER=elevenlabs
-
 # Prevent python from writing pyc files and buffering stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    HF_HOME=/app/.cache/huggingface \
-    STT_PROVIDER=${DEFAULT_STT_PROVIDER}
+    HF_HOME=/app/.cache/huggingface
 
 # Install system dependencies (ffmpeg is essential for audio transcoding)
 RUN apt-get update && apt-get install -y --no-install-recommends \
