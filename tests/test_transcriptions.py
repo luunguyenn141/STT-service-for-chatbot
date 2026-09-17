@@ -8,6 +8,7 @@ from app.api import transcriptions
 from app.config import get_settings
 from app.main import app
 from app.services.stt.base import (
+    ProviderInvalidAudio,
     ProviderRateLimited,
     ProviderTimeout,
     ProviderTranscription,
@@ -123,4 +124,17 @@ def test_provider_rate_limit_maps_to_429(monkeypatch):
 
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "provider_rate_limited"
+    get_settings.cache_clear()
+
+
+def test_provider_invalid_audio_maps_to_400(monkeypatch):
+    provider = StubProvider(ProviderInvalidAudio())
+    with _client_with_provider(monkeypatch, provider) as client:
+        response = client.post(
+            "/api/v1/transcriptions",
+            files={"audio": ("demo.wav", b"audio", "audio/wav")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_audio"
     get_settings.cache_clear()

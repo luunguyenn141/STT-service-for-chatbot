@@ -43,6 +43,10 @@ class ProviderNoSpeech(ProviderError):
     pass
 
 
+class ProviderInvalidAudio(ProviderError):
+    pass
+
+
 class ProviderRateLimited(ProviderError):
     pass
 

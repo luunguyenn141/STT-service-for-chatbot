@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+import inspect
 from pathlib import Path
 import secrets
 import time
@@ -17,6 +18,7 @@ from app.models import TranscriptionResponse, WordTiming
 from app.services.rate_limiter import rate_limiter
 from app.services.stt.base import (
     ProviderError,
+    ProviderInvalidAudio,
     ProviderNoSpeech,
     ProviderRateLimited,
     ProviderTimeout,
@@ -25,6 +27,7 @@ from app.services.stt.base import (
 )
 from app.services.stt.elevenlabs import ElevenLabsSTTProvider
 from app.services.stt.phowhisper import PhoWhisperSTTProvider
+from app.services.stt.vbee import VbeeSTTProvider
 
 logger = logging.getLogger("stt_poc.audit")
 router = APIRouter(prefix="/api/v1", tags=["transcriptions"])
@@ -172,6 +175,14 @@ async def create_transcription(request: Request):
             settings.stt_provider,
         )
         return _error(422, "no_speech_detected", "No recognizable speech was found in this audio.", request_id)
+    except ProviderInvalidAudio:
+        logger.warning(
+            "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=invalid_audio",
+            request_id,
+            client_ip,
+            settings.stt_provider,
+        )
+        return _error(400, "invalid_audio", "The audio could not be decoded or exceeds the provider limit.", request_id)
     except ProviderRateLimited:
         logger.warning(
             "audit_event=transcription_failed request_id=%s client_ip=%s provider=%s reason=provider_rate_limited",
@@ -240,6 +251,13 @@ def _build_provider(settings: Settings) -> STTProvider:
             model_id=settings.phowhisper_model_id,
             device=settings.phowhisper_device,
         )
+    if settings.stt_provider == "vbee":
+        assert settings.vbee_api_token is not None
+        return VbeeSTTProvider(
+            api_token=settings.vbee_api_token.get_secret_value().strip(),
+            app_id=settings.vbee_app_id,
+            timeout_seconds=settings.request_timeout_seconds,
+        )
     raise RuntimeError(f"Unsupported STT provider: {settings.stt_provider}")
 
 
@@ -255,11 +273,12 @@ async def _read_submission(
 ) -> AudioSubmission | JSONResponse:
     """Read a single multipart upload and release it after copying its bytes."""
     try:
-        form = await request.form(
-            max_files=1,
-            max_fields=2,
-            max_part_size=settings.max_upload_bytes,
-        )
+        form_options = {"max_files": 1, "max_fields": 2}
+        # Starlette added max_part_size after the original service shipped. The
+        # explicit bounded read below enforces the same application limit.
+        if "max_part_size" in inspect.signature(request.form).parameters:
+            form_options["max_part_size"] = settings.max_upload_bytes
+        form = await request.form(**form_options)
     except StarletteHTTPException:
         logger.warning(
             "audit_event=transcription_rejected request_id=%s client_ip=%s reason=invalid_multipart",
