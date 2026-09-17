@@ -55,7 +55,7 @@ jobs:
         run: python -m pytest --verbose
 
   docker-build:
-    name: Build PhoWhisper Image and Publish to VCR
+    name: Build Image and Publish to VCR
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: test
@@ -101,8 +101,7 @@ jobs:
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:latest
           build-args: |
-            INSTALL_PHOWHISPER=true
-            BUNDLE_PHOWHISPER_MODEL=true
-            PYTORCH_INDEX_URL=${{ vars.STT_PYTORCH_INDEX_URL || 'https://download.pytorch.org/whl/cpu' }}
-          cache-from: type=gha,scope=stt-phowhisper
-          cache-to: type=gha,mode=max,scope=stt-phowhisper
+            INSTALL_PHOWHISPER=false
+            BUNDLE_PHOWHISPER_MODEL=false
+          cache-from: type=gha,scope=stt-elevenlabs
+          cache-to: type=gha,mode=max,scope=stt-elevenlabs
