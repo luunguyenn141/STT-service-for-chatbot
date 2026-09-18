@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     elevenlabs_api_key: SecretStr | None = None
     stt_provider: str = "elevenlabs"
+
+    # ── OpenAI text refiner (optional post-processing) ──────────────────────
+    openai_api_key: SecretStr | None = None
+    openai_refine_model: str = "gpt-4o-mini"
     stt_model_id: str = "scribe_v2"
     stt_keyterms: str = ""
     phowhisper_model_id: str = "vinai/PhoWhisper-base"
@@ -102,6 +106,13 @@ class Settings(BaseSettings):
     def is_auth_enabled(self) -> bool:
         return self.service_api_key is not None and bool(
             self.service_api_key.get_secret_value().strip()
+        )
+
+    @property
+    def refine_enabled(self) -> bool:
+        """True when an OpenAI key is present and refining is active."""
+        return self.openai_api_key is not None and bool(
+            self.openai_api_key.get_secret_value().strip()
         )
 
     @property

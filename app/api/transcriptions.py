@@ -25,6 +25,7 @@ from app.services.stt.base import (
 )
 from app.services.stt.elevenlabs import ElevenLabsSTTProvider
 from app.services.stt.phowhisper import PhoWhisperSTTProvider
+from app.services.text_refiner import refine_text
 
 logger = logging.getLogger("stt_poc.audit")
 router = APIRouter(prefix="/api/v1", tags=["transcriptions"])
@@ -207,9 +208,20 @@ async def create_transcription(request: Request):
         duration_ms,
     )
 
+    # 5. Optional: refine raw STT output with OpenAI (fail-open)
+    final_text = result.text
+    if settings.refine_enabled:
+        assert settings.openai_api_key is not None
+        final_text = await refine_text(
+            result.text,
+            openai_api_key=settings.openai_api_key.get_secret_value(),
+            keyterms=resolved_keyterms,
+            model=settings.openai_refine_model,
+        )
+
     return TranscriptionResponse(
         request_id=request_id,
-        text=result.text,
+        text=final_text,
         language_code=result.language_code,
         language_probability=result.language_probability,
         words=[

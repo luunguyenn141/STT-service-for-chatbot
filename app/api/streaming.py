@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.services.rate_limiter import rate_limiter
 from app.services.streaming import SAMPLE_RATE, TICKET_TTL, UtteranceBuffer, issue_ticket, pcm_to_wav, verify_ticket
 from app.services.stt.base import ProviderError, ProviderNoSpeech
+from app.services.text_refiner import refine_text
 
 router = APIRouter(prefix="/api/v1", tags=["streaming"])
 _active_sessions = 0
@@ -132,6 +133,14 @@ async def stream_transcription(ws: WebSocket):
                 except ProviderNoSpeech:
                     text = ""
             if final:
+                # Refine the final text with OpenAI if configured (fail-open)
+                if text and settings.refine_enabled:
+                    assert settings.openai_api_key is not None
+                    text = await refine_text(
+                        text,
+                        openai_api_key=settings.openai_api_key.get_secret_value(),
+                        model=settings.openai_refine_model,
+                    )
                 await ws.send_json({"type": "final", "text": text, "reason": buffer.reason})
                 return
             # If the final snapshot is ready, skip a stale partial and process it.
