@@ -29,6 +29,8 @@ class StubProvider:
 
 def _client_with_provider(monkeypatch, provider: StubProvider, **environment: str) -> TestClient:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test-key")
+    monkeypatch.setenv("STT_REFINE_ENABLED", "false")
+    monkeypatch.setenv("STT_KEYTERMS", "")
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()
@@ -57,6 +59,9 @@ def test_valid_audio_maps_provider_response(monkeypatch):
     assert response.status_code == 200
     payload = response.json()
     assert payload["text"] == "Tôi muốn kiểm tra số dư tài khoản"
+    assert payload["raw_text"] == payload["text"]
+    assert payload["refined"] is False
+    assert payload["refinement_status"] == "disabled"
     assert payload["language_code"] == "vie"
     assert payload["words"][0]["logprob"] == -0.03
     assert provider.captured_keyterms == ["MSB", "thẻ tín dụng"]

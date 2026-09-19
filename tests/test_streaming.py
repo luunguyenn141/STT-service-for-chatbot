@@ -30,8 +30,12 @@ def client(monkeypatch):
     assert streaming._active_sessions == 0
 
 
-def ticket(client):
-    response = client.post("/api/v1/stream-sessions", json={"origin": ORIGIN}, headers={"x-api-key": "test-secret"})
+def ticket(client, keyterms=None):
+    response = client.post(
+        "/api/v1/stream-sessions",
+        json={"origin": ORIGIN, "keyterms": keyterms or []},
+        headers={"x-api-key": "test-secret"},
+    )
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     return response.json()["token"]
@@ -64,6 +68,28 @@ def test_ticket_expiration_tampering_and_shared_secret(monkeypatch):
     assert not protocol.verify_ticket(settings, {"bad": "type"}, ORIGIN)
     monkeypatch.setattr(protocol.time, "time", lambda: 1060)
     assert not protocol.verify_ticket(settings, token, ORIGIN)
+
+
+def test_ticket_carries_sanitized_session_keyterms(client):
+    token = ticket(client, [" hũ Ăn uống ", "hũ Ăn uống", "hũ Tiết kiệm"])
+    claims = protocol.read_ticket(Settings(_env_file=None, service_api_key="test-secret"), token, ORIGIN)
+    assert claims is not None
+    assert claims["keyterms"] == ["hũ Ăn uống", "hũ Tiết kiệm"]
+
+    response = client.post(
+        "/api/v1/stream-sessions",
+        json={"origin": ORIGIN, "keyterms": ["x" * 65]},
+        headers={"x-api-key": "test-secret"},
+    )
+    assert response.status_code == 422
+
+    long_terms = [f"hũ {'ấ' * 55}{index}" for index in range(20)]
+    bounded_token = ticket(client, long_terms)
+    bounded_claims = protocol.read_ticket(
+        Settings(_env_file=None, service_api_key="test-secret"), bounded_token, ORIGIN,
+    )
+    assert bounded_claims is not None
+    assert 0 < len(bounded_claims["keyterms"]) < len(long_terms)
 
 
 def test_pcm_buffer_ignores_silence_then_keeps_preroll_and_stops_at_pause():
@@ -110,7 +136,14 @@ def test_stream_returns_partial_before_stop_and_final_contains_tail(client, monk
         ws.send_json({"type": "stop"})
         assert ws.receive_json()["type"] == "finishing"
         final = ws.receive_json()
-        assert final == {"type": "final", "text": "Đã nghe 35300", "reason": "stop"}
+        assert final == {
+            "type": "final",
+            "text": "Đã nghe 35300",
+            "raw_text": "Đã nghe 35300",
+            "refined": False,
+            "refinement_status": "disabled",
+            "reason": "stop",
+        }
     assert snapshots[-1] == VOICE * 55 + VOICE[:100]
 
 
@@ -127,7 +160,14 @@ def test_silence_auto_finalizes_and_no_speech_does_not_invoke_model(client, monk
         messages = []
         while not messages or messages[-1]["type"] != "final":
             messages.append(ws.receive_json())
-        assert messages[-1] == {"type": "final", "text": "Xin chào", "reason": "silence"}
+        assert messages[-1] == {
+            "type": "final",
+            "text": "Xin chào",
+            "raw_text": "Xin chào",
+            "refined": False,
+            "refinement_status": "disabled",
+            "reason": "silence",
+        }
     class NoCall:
         async def transcribe(self, **_):
             pytest.fail("Silence must not invoke inference")

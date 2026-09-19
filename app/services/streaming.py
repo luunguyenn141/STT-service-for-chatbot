@@ -28,25 +28,39 @@ def _signing_key(settings: Settings) -> bytes:
     return _development_secret
 
 
-def issue_ticket(settings: Settings, origin: str) -> str:
-    claims = {"origin": origin, "exp": int(time.time()) + TICKET_TTL, "nonce": secrets.token_hex(16)}
+def issue_ticket(settings: Settings, origin: str, keyterms: list[str] | None = None) -> str:
+    claims = {
+        "origin": origin,
+        "exp": int(time.time()) + TICKET_TTL,
+        "nonce": secrets.token_hex(16),
+        "keyterms": (keyterms or [])[:20],
+    }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
     signature = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
 
 
-def verify_ticket(settings: Settings, ticket: str, origin: str) -> bool:
+def read_ticket(settings: Settings, ticket: str, origin: str) -> dict | None:
     try:
         if not isinstance(ticket, str) or len(ticket) > 2048:
-            return False
+            return None
         payload, signature = ticket.split(".")
         expected = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
-            return False
+            return None
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        return claims["origin"] == origin and time.time() < claims["exp"] <= time.time() + TICKET_TTL + 1
+        keyterms = claims.get("keyterms", [])
+        if not isinstance(keyterms, list) or not all(isinstance(term, str) for term in keyterms):
+            return None
+        if claims["origin"] != origin or not time.time() < claims["exp"] <= time.time() + TICKET_TTL + 1:
+            return None
+        return claims
     except (ValueError, KeyError, TypeError):
-        return False
+        return None
+
+
+def verify_ticket(settings: Settings, ticket: str, origin: str) -> bool:
+    return read_ticket(settings, ticket, origin) is not None
 
 
 def pcm_to_wav(pcm: bytes) -> bytes:

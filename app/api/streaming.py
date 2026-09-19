@@ -13,9 +13,9 @@ from pydantic import BaseModel, Field, field_validator
 from app.api.transcriptions import _build_provider, _is_authenticated
 from app.config import get_settings
 from app.services.rate_limiter import rate_limiter
-from app.services.streaming import SAMPLE_RATE, TICKET_TTL, UtteranceBuffer, issue_ticket, pcm_to_wav, verify_ticket
+from app.services.streaming import SAMPLE_RATE, TICKET_TTL, UtteranceBuffer, issue_ticket, pcm_to_wav, read_ticket
 from app.services.stt.base import ProviderError, ProviderNoSpeech
-from app.services.text_refiner import refine_text
+from app.services.transcript_refiner import refine_transcript
 
 router = APIRouter(prefix="/api/v1", tags=["streaming"])
 _active_sessions = 0
@@ -23,6 +23,7 @@ _active_sessions = 0
 
 class SessionRequest(BaseModel):
     origin: str = Field(max_length=512)
+    keyterms: list[str] = Field(default_factory=list, max_length=20)
 
     @field_validator("origin")
     @classmethod
@@ -32,6 +33,26 @@ class SessionRequest(BaseModel):
                 or parts.query or parts.fragment or parts.username or parts.password):
             raise ValueError("Expected a browser origin, e.g. https://chat.example.com")
         return value
+
+    @field_validator("keyterms")
+    @classmethod
+    def valid_keyterms(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        total_bytes = 0
+        for value in values:
+            term = " ".join(value.strip().split())
+            if not term or len(term) > 64 or any(ord(char) < 32 for char in term):
+                raise ValueError("Each keyterm must be a single non-empty line of at most 64 characters.")
+            key = term.casefold()
+            if key not in seen:
+                encoded_size = len(term.encode("utf-8"))
+                if total_bytes + encoded_size > 640:
+                    break
+                seen.add(key)
+                cleaned.append(term)
+                total_bytes += encoded_size
+        return cleaned
 
 
 @router.post("/stream-sessions")
@@ -44,7 +65,7 @@ async def create_session(body: SessionRequest, request: Request):
     if not allowed:
         raise HTTPException(429, "Too many streaming sessions.")
     return JSONResponse(
-        {"token": issue_ticket(settings, body.origin), "expires_in": TICKET_TTL,
+        {"token": issue_ticket(settings, body.origin, body.keyterms), "expires_in": TICKET_TTL,
          "sample_rate": SAMPLE_RATE, "format": "pcm_s16le", "channels": 1},
         headers={"Cache-Control": "no-store"},
     )
@@ -68,7 +89,8 @@ async def stream_transcription(ws: WebSocket):
         start = json.loads(message)
         if not isinstance(start, dict) or start.get("type") != "start":
             raise ValueError
-        if not verify_ticket(settings, start.get("token", ""), ws.headers.get("origin", "")):
+        claims = read_ticket(settings, start.get("token", ""), ws.headers.get("origin", ""))
+        if claims is None:
             await _error(ws, "unauthorized", "Phiên ghi âm hết hạn. Vui lòng thử lại.")
             return
     except (ValueError, TypeError, KeyError, asyncio.TimeoutError):
@@ -86,6 +108,7 @@ async def stream_transcription(ws: WebSocket):
     provider = _build_provider(settings)
     started = time.monotonic()
     last_partial_size = 0
+    session_keyterms = list(dict.fromkeys(settings.configured_keyterms + claims.get("keyterms", [])))
 
     async def receive_audio():
         nonlocal last_partial_size
@@ -127,21 +150,42 @@ async def stream_transcription(ws: WebSocket):
                 try:
                     result = await asyncio.wait_for(provider.transcribe(
                         audio_bytes=pcm_to_wav(snapshot), filename="stream.wav", content_type="audio/wav",
-                        language="vie", keyterms=[],
+                        language="vie", keyterms=session_keyterms,
                     ), timeout=settings.request_timeout_seconds)
                     text = result.text
                 except ProviderNoSpeech:
                     text = ""
             if final:
                 # Refine the final text with OpenAI if configured (fail-open)
+                raw_text = text
+                refinement_status = "disabled"
                 if text and settings.refine_enabled:
                     assert settings.openai_api_key is not None
-                    text = await refine_text(
+                    refinement = await refine_transcript(
                         text,
                         openai_api_key=settings.openai_api_key.get_secret_value(),
+                        keyterms=session_keyterms,
                         model=settings.openai_refine_model,
+                        timeout_seconds=settings.stt_refine_timeout_seconds,
+                        max_chars=settings.stt_refine_max_chars,
+                        normalize_money=settings.stt_refine_money,
+                        money_separator=settings.stt_refine_money_separator,
+                        name_case=settings.stt_refine_name_case,
+                        names=settings.stt_refine_names,
+                        term_aliases=settings.stt_refine_term_aliases,
+                        entities=settings.stt_refine_entities,
+                        min_similarity=settings.stt_refine_min_similarity,
                     )
-                await ws.send_json({"type": "final", "text": text, "reason": buffer.reason})
+                    text = refinement.text
+                    refinement_status = refinement.status
+                await ws.send_json({
+                    "type": "final",
+                    "text": text,
+                    "raw_text": raw_text,
+                    "refined": text != raw_text,
+                    "refinement_status": refinement_status,
+                    "reason": buffer.reason,
+                })
                 return
             # If the final snapshot is ready, skip a stale partial and process it.
             if buffer.reason is None and text and text != previous:
