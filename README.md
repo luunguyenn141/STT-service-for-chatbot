@@ -204,8 +204,21 @@ enough time for imports and loading the model into memory.
 Streaming uses a short-lived ticket and a bidirectional WebSocket:
 
 1. Chatbot backend calls `POST /api/v1/stream-sessions` with the service key
-   (`x-api-key` or Bearer) and JSON such as
-   `{"origin":"https://your-chatbot.example.com","keyterms":["hũ Ăn uống","hũ Tiết kiệm"]}`.
+   (`x-api-key` or Bearer). Send the current user's domain entities instead of a
+   global jar list, for example:
+
+   ```json
+   {
+     "origin": "https://your-chatbot.example.com",
+     "keyterms": ["hũ Ăn uống", "hũ Du lịch Bali"],
+     "entities": [
+       {"id": "food", "type": "budget_jar", "label": "Ăn uống", "aliases": ["hũ Ăn uống"]},
+       {"id": "bali", "type": "budget_jar", "label": "Du lịch Bali", "aliases": ["hũ Du lịch Bali"]}
+     ],
+     "intents": ["transfer_between_jars"],
+     "endpointing": "manual"
+   }
+   ```
 2. Pass the returned `token` to the browser. It expires after 60 seconds and is
    bound to that Origin. Keep the service key on the chatbot backend.
 3. Browser connects to `wss://<endpoint>/api/v1/transcriptions/stream` and sends
@@ -218,8 +231,8 @@ Streaming uses a short-lived ticket and a bidirectional WebSocket:
 6. Flush any remaining audio before `{"type":"stop"}`. A 900 ms pause also ends
    the utterance automatically. `finishing` means stop microphone capture;
    `final` is emitted only after optional OpenAI refinement and contains `text`,
-   `raw_text`, `refined`, `refinement_status`, and `reason` (`stop`, `silence`,
-   `max_duration`).
+   `raw_text`, `refined`, `refinement_status`, `interpretation`, and `reason`
+   (`stop`, `silence`, `max_duration`).
    The server then closes the connection. Start a new session for a new utterance.
 
 When `OPENAI_API_KEY` and `STT_REFINE_ENABLED=true` are configured, the refiner
@@ -230,6 +243,24 @@ and are protected from model substitutions. Explicit money phrases are then
 formatted deterministically, for example `năm trăm nghìn` becomes `500.000 VND`.
 Truncated, unsafe, timed-out, or invalid model output falls back to the
 deterministically normalized transcript; transcript content is never logged.
+The model is also rejected if it changes an intent's amount, source/destination
+roles, missing fields, ambiguity, or negation.
+
+`interpretation` is deterministic and independently validated after refinement.
+For `transfer_between_jars`, it contains `amount`, `source`, and `destination`
+slots whose entity values include the caller's stable jar IDs. `actionable` is
+true only when every required slot is present, unambiguous, not negated, and the
+source differs from the destination. Otherwise `clarification` contains a short
+Vietnamese follow-up for the UI. The same extraction still runs when OpenAI is
+disabled or falls back; money and jar homophones are normalized locally for that
+validation without rewriting the returned raw transcript.
+
+To add an intent, implement one isolated handler in
+`app/services/intent_interpreter.py`, register it in `_INTERPRETERS` and
+`SUPPORTED_INTENTS`, then add its prompt-only wording hint in `_INTENT_HINTS` if
+refinement benefits from it. Keep required slots and business validation in the
+handler. Clients opt into each intent per session, so deploying a new handler does
+not change existing consumers.
 
 Requires `STT_PROVIDER=phowhisper` and an updated image. PhoWhisper runs repeated
 inference on accumulated audio; this is near-real-time transcription, not a native

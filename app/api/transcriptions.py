@@ -211,6 +211,7 @@ async def create_transcription(request: Request):
     # 5. Optional: refine raw STT output with OpenAI (fail-open)
     final_text = result.text
     refinement_status = "disabled"
+    interpretation = None
     if settings.refine_enabled:
         assert settings.openai_api_key is not None
         refinement = await refine_transcript(
@@ -230,6 +231,7 @@ async def create_transcription(request: Request):
         )
         final_text = refinement.text
         refinement_status = refinement.status
+        interpretation = refinement.interpretation
 
     return TranscriptionResponse(
         request_id=request_id,
@@ -237,6 +239,7 @@ async def create_transcription(request: Request):
         raw_text=result.text,
         refined=final_text != result.text,
         refinement_status=refinement_status,
+        interpretation=interpretation,
         language_code=result.language_code,
         language_probability=result.language_probability,
         words=[

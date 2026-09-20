@@ -30,10 +30,16 @@ def client(monkeypatch):
     assert streaming._active_sessions == 0
 
 
-def ticket(client, keyterms=None, endpointing="silence"):
+def ticket(client, keyterms=None, endpointing="silence", entities=None, intents=None):
     response = client.post(
         "/api/v1/stream-sessions",
-        json={"origin": ORIGIN, "keyterms": keyterms or [], "endpointing": endpointing},
+        json={
+            "origin": ORIGIN,
+            "keyterms": keyterms or [],
+            "endpointing": endpointing,
+            "entities": entities or [],
+            "intents": intents or [],
+        },
         headers={"x-api-key": "test-secret"},
     )
     assert response.status_code == 200
@@ -103,6 +109,19 @@ def test_ticket_carries_sanitized_session_keyterms(client):
         headers={"x-api-key": "test-secret"},
     ).status_code == 422
 
+    custom_entities = [{
+        "id": "trip-bali", "type": "budget_jar", "label": "Du lịch Bali",
+        "aliases": ["hũ Du lịch Bali"],
+    }]
+    context_claims = protocol.read_ticket(
+        Settings(_env_file=None, service_api_key="test-secret"),
+        ticket(client, entities=custom_entities, intents=["transfer_between_jars", "unsupported"]),
+        ORIGIN,
+    )
+    assert context_claims is not None
+    assert context_claims["entities"] == custom_entities
+    assert context_claims["intents"] == ["transfer_between_jars"]
+
 
 def test_pcm_buffer_ignores_silence_then_keeps_preroll_and_stops_at_pause():
     buffer = protocol.UtteranceBuffer(Settings(_env_file=None))
@@ -165,9 +184,61 @@ def test_stream_returns_partial_before_stop_and_final_contains_tail(client, monk
             "raw_text": "Đã nghe 35300",
             "refined": False,
             "refinement_status": "disabled",
+            "interpretation": None,
             "reason": "stop",
         }
     assert snapshots[-1] == VOICE * 55 + VOICE[:100]
+
+
+def test_stream_returns_dynamic_incomplete_intent_for_ui_clarification(client, monkeypatch):
+    class Provider:
+        async def transcribe(self, **_):
+            return ProviderTranscription(text="Chuyển 500.000 VND sang hũ Du lịch Bali")
+
+    monkeypatch.setattr(streaming, "_build_provider", lambda _: Provider())
+    entities = [{
+        "id": "trip-bali", "type": "budget_jar", "label": "Du lịch Bali",
+        "aliases": ["hũ Du lịch Bali"],
+    }]
+    token = ticket(client, entities=entities, intents=["transfer_between_jars"])
+    with connect(client, token) as ws:
+        start(ws, token)
+        ws.send_bytes(VOICE * 15)
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["type"] == "finishing"
+        final = ws.receive_json()
+    assert final["interpretation"]["intent"] == "transfer_between_jars"
+    assert final["interpretation"]["status"] == "incomplete"
+    assert final["interpretation"]["missing_slots"] == ["source"]
+    assert final["interpretation"]["clarification"] == "Bạn muốn chuyển tiền từ hũ nào?"
+
+
+def test_disabled_refinement_still_normalizes_amount_and_jar_homophones_for_intent(client, monkeypatch):
+    class Provider:
+        async def transcribe(self, **_):
+            return ProviderTranscription(
+                text="Chuyển năm trăm nghìn từ hữu Chi tiêu hằng ngày sang hữu Du lịch Bali",
+            )
+
+    monkeypatch.setattr(streaming, "_build_provider", lambda _: Provider())
+    entities = [
+        {"id": "daily", "type": "budget_jar", "label": "Chi tiêu hằng ngày", "aliases": []},
+        {"id": "bali", "type": "budget_jar", "label": "Du lịch Bali", "aliases": []},
+    ]
+    token = ticket(client, entities=entities, intents=["transfer_between_jars"])
+    with connect(client, token) as ws:
+        start(ws, token)
+        ws.send_bytes(VOICE * 15)
+        ws.send_json({"type": "stop"})
+        assert ws.receive_json()["type"] == "finishing"
+        final = ws.receive_json()
+    assert final["refinement_status"] == "disabled"
+    assert final["text"].startswith("Chuyển năm trăm nghìn")
+    assert final["interpretation"]["status"] == "complete"
+    slots = {slot["name"]: slot for slot in final["interpretation"]["slots"]}
+    assert slots["amount"]["value"] == 500_000
+    assert slots["source"]["entity_id"] == "daily"
+    assert slots["destination"]["entity_id"] == "bali"
 
 
 def test_silence_auto_finalizes_and_no_speech_does_not_invoke_model(client, monkeypatch):
@@ -189,6 +260,7 @@ def test_silence_auto_finalizes_and_no_speech_does_not_invoke_model(client, monk
             "raw_text": "Xin chào",
             "refined": False,
             "refinement_status": "disabled",
+            "interpretation": None,
             "reason": "silence",
         }
     class NoCall:

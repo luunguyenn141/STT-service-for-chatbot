@@ -13,6 +13,9 @@ from typing import Final, Literal
 
 import httpx
 
+from app.models import IntentInterpretation
+from app.services.intent_interpreter import interpret_transcript
+
 logger = logging.getLogger("stt_poc.refiner")
 
 RefinementStatus = Literal["refined", "unchanged", "fallback", "skipped"]
@@ -22,6 +25,7 @@ RefinementStatus = Literal["refined", "unchanged", "fallback", "skipped"]
 class RefinementResult:
     text: str
     status: RefinementStatus
+    interpretation: IntentInterpretation | None = None
 
     @property
     def changed(self) -> bool:
@@ -40,6 +44,13 @@ _SYSTEM_PROMPT: Final[str] = (
 )
 _OPENAI_CHAT_URL: Final[str] = "https://api.openai.com/v1/chat/completions"
 _DEFAULT_MODEL: Final[str] = "gpt-4o-mini"
+_INTENT_HINTS: Final[dict[str, str]] = {
+    "transfer_between_jars": (
+        "Nếu câu nói về chuyển tiền giữa các hũ, giữ rõ cấu trúc số tiền, "
+        "hũ nguồn sau 'từ' và hũ đích sau 'sang/vào/tới/đến'. "
+        "Không tự điền thành phần người dùng chưa nói."
+    ),
+}
 
 _OUTPUT_SCHEMA: Final[dict] = {
     "name": "stt_refinement",
@@ -381,6 +392,24 @@ def _finalize(
     return _apply_names(text.strip(), names, name_case)
 
 
+def _intent_signature(value: IntentInterpretation | None) -> tuple | None:
+    """Keep the model from changing the roles or completeness of an action."""
+    if value is None:
+        return None
+    slots = tuple(sorted(
+        (slot.name, slot.entity_id, str(slot.value))
+        for slot in value.slots
+    ))
+    return (
+        value.intent,
+        value.status,
+        value.negated,
+        slots,
+        tuple(value.missing_slots),
+        tuple(value.ambiguous_slots),
+    )
+
+
 async def refine_transcript(
     raw_text: str,
     *,
@@ -395,6 +424,8 @@ async def refine_transcript(
     names: list[str] | None = None,
     term_aliases: dict[str, str] | None = None,
     entities: list[str] | None = None,
+    context_entities: list[dict] | None = None,
+    enabled_intents: list[str] | None = None,
     min_similarity: float = 0.72,
 ) -> RefinementResult:
     """Refine a transcript and fall back to deterministic, locally safe formatting."""
@@ -402,10 +433,20 @@ async def refine_transcript(
         return RefinementResult(raw_text, "unchanged")
 
     configured_names = names or []
+    dynamic_entity_terms: list[str] = []
+    for entity in context_entities or []:
+        if not isinstance(entity, dict) or entity.get("type") != "budget_jar":
+            continue
+        label = entity.get("label")
+        if isinstance(label, str) and label.strip():
+            dynamic_entity_terms.append(f"hũ {' '.join(label.split())}")
+        aliases = entity.get("aliases", [])
+        if isinstance(aliases, list):
+            dynamic_entity_terms.extend(alias for alias in aliases if isinstance(alias, str) and alias.strip())
     source = _replace_configured(raw_text.strip(), term_aliases or {})
     source, canonical_entities = canonicalize_domain_entities(
         source,
-        (entities or []) + (keyterms or []),
+        (entities or []) + (keyterms or []) + dynamic_entity_terms,
     )
     finalize_options = {
         "normalize_money": normalize_money,
@@ -414,15 +455,26 @@ async def refine_transcript(
         "name_case": name_case,
     }
     fallback = _finalize(source, **finalize_options)
+    def interpretation_for(value: str) -> IntentInterpretation | None:
+        return interpret_transcript(
+            value,
+            context_entities=context_entities,
+            enabled_intents=enabled_intents,
+        )
+    source_interpretation = interpretation_for(fallback)
     if len(source) > max_chars:
         logger.info("audit_event=text_refine_skipped reason=input_too_long input_len=%d", len(source))
-        return RefinementResult(fallback, "skipped")
+        return RefinementResult(fallback, "skipped", interpretation_for(fallback))
 
     keyterm_hint = f"\nThuật ngữ ưu tiên: {', '.join((keyterms or [])[:50])}." if keyterms else ""
     entity_hint = (
         f"\nTên hũ hợp lệ (không được đổi sang tên người hoặc tên khác): {', '.join(canonical_entities[:30])}."
         if canonical_entities else ""
     )
+    intent_hints = [
+        _INTENT_HINTS[intent] for intent in (enabled_intents or []) if intent in _INTENT_HINTS
+    ]
+    intent_hint = f"\nNgữ cảnh tác vụ: {' '.join(intent_hints)}" if intent_hints else ""
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.post(
@@ -432,7 +484,7 @@ async def refine_transcript(
                     "model": model,
                     "messages": [
                         {"role": "system", "content": _SYSTEM_PROMPT},
-                        {"role": "user", "content": f"Chỉnh sửa bản chép lời sau.{keyterm_hint}{entity_hint}\n\n{source}"},
+                        {"role": "user", "content": f"Chỉnh sửa bản chép lời sau.{keyterm_hint}{entity_hint}{intent_hint}\n\n{source}"},
                     ],
                     "temperature": 0.0,
                     "max_tokens": min(4096, max(256, len(source) * 2)),
@@ -454,12 +506,15 @@ async def refine_transcript(
             if not _locally_safe(source, candidate, configured_names, canonical_entities, min_similarity):
                 raise ValueError("local semantic guard rejected output")
             final = _finalize(candidate, **finalize_options)
+            candidate_interpretation = interpretation_for(final)
+            if _intent_signature(source_interpretation) != _intent_signature(candidate_interpretation):
+                raise ValueError("intent roles or completeness changed")
             status: RefinementStatus = "refined" if final != raw_text.strip() else "unchanged"
             logger.info(
                 "audit_event=text_refine_success model=%s status=%s input_len=%d output_len=%d",
                 model, status, len(raw_text), len(final),
             )
-            return RefinementResult(final, status)
+            return RefinementResult(final, status, candidate_interpretation)
     except httpx.TimeoutException:
         reason = "timeout"
     except httpx.HTTPStatusError as exc:
@@ -470,7 +525,7 @@ async def refine_transcript(
         reason = "error"
 
     logger.warning("audit_event=text_refine_fallback model=%s reason=%s", model, reason)
-    return RefinementResult(fallback, "fallback")
+    return RefinementResult(fallback, "fallback", interpretation_for(fallback))
 
 
 async def refine_text(raw_text: str, **kwargs) -> str:
