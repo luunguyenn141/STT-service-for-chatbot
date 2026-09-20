@@ -37,6 +37,8 @@ def issue_ticket(
     origin: str,
     keyterms: list[str] | None = None,
     endpointing: EndpointingMode = "silence",
+    context_entities: list[dict] | None = None,
+    enabled_intents: list[str] | None = None,
 ) -> str:
     claims = {
         "origin": origin,
@@ -44,6 +46,8 @@ def issue_ticket(
         "nonce": secrets.token_hex(16),
         "keyterms": (keyterms or [])[:20],
         "endpointing": endpointing,
+        "entities": (context_entities or [])[:20],
+        "intents": (enabled_intents or [])[:10],
     }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
     signature = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
@@ -52,7 +56,7 @@ def issue_ticket(
 
 def read_ticket(settings: Settings, ticket: str, origin: str) -> dict | None:
     try:
-        if not isinstance(ticket, str) or len(ticket) > 2048:
+        if not isinstance(ticket, str) or len(ticket) > 8192:
             return None
         payload, signature = ticket.split(".")
         expected = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
@@ -66,6 +70,20 @@ def read_ticket(settings: Settings, ticket: str, origin: str) -> dict | None:
         if endpointing not in {"silence", "manual"}:
             return None
         claims["endpointing"] = endpointing
+        entities = claims.get("entities", [])
+        if not isinstance(entities, list) or len(entities) > 20:
+            return None
+        for entity in entities:
+            if not isinstance(entity, dict) or set(entity) - {"id", "type", "label", "aliases"}:
+                return None
+            if not all(isinstance(entity.get(key), str) for key in ("id", "type", "label")):
+                return None
+            aliases = entity.get("aliases", [])
+            if not isinstance(aliases, list) or len(aliases) > 5 or not all(isinstance(alias, str) for alias in aliases):
+                return None
+        intents = claims.get("intents", [])
+        if not isinstance(intents, list) or len(intents) > 10 or not all(isinstance(intent, str) for intent in intents):
+            return None
         if claims["origin"] != origin or not time.time() < claims["exp"] <= time.time() + TICKET_TTL + 1:
             return None
         return claims

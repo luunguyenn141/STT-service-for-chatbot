@@ -177,3 +177,50 @@ async def test_valid_jar_entities_are_kept_and_included_in_prompt(monkeypatch):
     assert "Tên hũ hợp lệ" in prompt
     assert "hũ chi tiêu" in prompt
     assert "hũ ăn uống" in prompt
+
+
+@pytest.mark.asyncio
+async def test_dynamic_context_returns_validated_incomplete_intent(monkeypatch):
+    captured = _mock_openai(
+        monkeypatch,
+        text="Chuyển 500 nghìn sang hũ Du lịch Bali.",
+    )
+    result = await transcript_refiner.refine_transcript(
+        "chuyển 500 nghìn sang hũ du lịch Bali",
+        openai_api_key="secret",
+        context_entities=[{
+            "id": "trip-bali", "type": "budget_jar", "label": "Du lịch Bali",
+            "aliases": ["hũ Du lịch Bali"],
+        }],
+        enabled_intents=["transfer_between_jars"],
+    )
+    assert result.interpretation is not None
+    assert result.interpretation.status == "incomplete"
+    assert result.interpretation.missing_slots == ["source"]
+    assert result.interpretation.clarification == "Bạn muốn chuyển tiền từ hũ nào?"
+    prompt = captured["json"]["messages"][1]["content"]
+    assert "hũ Du lịch Bali" in prompt
+    assert "Không tự điền" in prompt
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_swap_dynamic_source_and_destination_roles(monkeypatch):
+    _mock_openai(
+        monkeypatch,
+        text="Chuyển 500 nghìn từ hũ Du lịch Bali sang hũ Chi tiêu hằng ngày.",
+    )
+    entities = [
+        {"id": "daily", "type": "budget_jar", "label": "Chi tiêu hằng ngày", "aliases": []},
+        {"id": "bali", "type": "budget_jar", "label": "Du lịch Bali", "aliases": []},
+    ]
+    result = await transcript_refiner.refine_transcript(
+        "Chuyển 500 nghìn từ hũ Chi tiêu hằng ngày sang hũ Du lịch Bali",
+        openai_api_key="secret",
+        context_entities=entities,
+        enabled_intents=["transfer_between_jars"],
+    )
+    assert result.status == "fallback"
+    assert result.interpretation is not None
+    slots = {slot.name: slot for slot in result.interpretation.slots}
+    assert slots["source"].entity_id == "daily"
+    assert slots["destination"].entity_id == "bali"

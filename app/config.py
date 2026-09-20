@@ -28,10 +28,9 @@ class Settings(BaseSettings):
     stt_refine_name_case: Literal["title", "upper", "preserve"] = "title"
     stt_refine_names: list[str] = Field(default_factory=list)
     stt_refine_term_aliases: dict[str, str] = Field(default_factory=dict)
-    stt_refine_entities: list[str] = Field(default_factory=lambda: [
-        "hũ chi tiêu", "hũ ăn uống", "hũ thiết yếu", "hũ di chuyển",
-        "hũ hưởng thụ", "hũ sức khỏe", "hũ tiết kiệm",
-    ])
+    # Product entities are supplied per session. Keep this only for optional
+    # deployment-wide vocabulary that is truly shared by every customer.
+    stt_refine_entities: list[str] = Field(default_factory=list)
     stt_refine_min_similarity: float = Field(default=0.72, ge=0.5, le=1.0)
     stt_model_id: str = "scribe_v2"
     stt_keyterms: str = ""

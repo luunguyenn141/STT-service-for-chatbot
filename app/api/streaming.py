@@ -16,16 +16,49 @@ from app.config import get_settings
 from app.services.rate_limiter import rate_limiter
 from app.services.streaming import SAMPLE_RATE, TICKET_TTL, UtteranceBuffer, issue_ticket, pcm_to_wav, read_ticket
 from app.services.stt.base import ProviderError, ProviderNoSpeech
-from app.services.transcript_refiner import refine_transcript
+from app.services.intent_interpreter import SUPPORTED_INTENTS, interpret_transcript
+from app.services.transcript_refiner import canonicalize_domain_entities, normalize_vnd, refine_transcript
 
 router = APIRouter(prefix="/api/v1", tags=["streaming"])
 _active_sessions = 0
+
+
+class ContextEntityRequest(BaseModel):
+    id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9._:-]+$")
+    type: str = Field(min_length=1, max_length=32, pattern=r"^[a-z][a-z0-9_]*$")
+    label: str = Field(min_length=1, max_length=64)
+    aliases: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator("label")
+    @classmethod
+    def clean_label(cls, value: str) -> str:
+        clean = " ".join(value.strip().split())
+        if not clean or any(ord(char) < 32 for char in clean):
+            raise ValueError("Entity labels must be printable text.")
+        return clean
+
+    @field_validator("aliases")
+    @classmethod
+    def clean_aliases(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            alias = " ".join(value.strip().split())
+            if not alias or len(alias) > 64 or any(ord(char) < 32 for char in alias):
+                raise ValueError("Entity aliases must be printable text of at most 64 characters.")
+            key = alias.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(alias)
+        return cleaned
 
 
 class SessionRequest(BaseModel):
     origin: str = Field(max_length=512)
     keyterms: list[str] = Field(default_factory=list, max_length=20)
     endpointing: Literal["silence", "manual"] = "silence"
+    entities: list[ContextEntityRequest] = Field(default_factory=list, max_length=20)
+    intents: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("origin")
     @classmethod
@@ -56,6 +89,11 @@ class SessionRequest(BaseModel):
                 total_bytes += encoded_size
         return cleaned
 
+    @field_validator("intents")
+    @classmethod
+    def valid_intents(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(intent for intent in values if intent in SUPPORTED_INTENTS))
+
 
 @router.post("/stream-sessions")
 async def create_session(body: SessionRequest, request: Request):
@@ -67,7 +105,14 @@ async def create_session(body: SessionRequest, request: Request):
     if not allowed:
         raise HTTPException(429, "Too many streaming sessions.")
     return JSONResponse(
-        {"token": issue_ticket(settings, body.origin, body.keyterms, body.endpointing), "expires_in": TICKET_TTL,
+        {"token": issue_ticket(
+            settings,
+            body.origin,
+            body.keyterms,
+            body.endpointing,
+            [entity.model_dump() for entity in body.entities],
+            body.intents,
+        ), "expires_in": TICKET_TTL,
          "sample_rate": SAMPLE_RATE, "format": "pcm_s16le", "channels": 1},
         headers={"Cache-Control": "no-store"},
     )
@@ -86,7 +131,7 @@ async def stream_transcription(ws: WebSocket):
     # The ticket is in the first message, never a URL/query parameter in logs.
     try:
         message = await asyncio.wait_for(ws.receive_text(), timeout=5)
-        if len(message) > 4096:
+        if len(message) > 12_000:
             raise ValueError
         start = json.loads(message)
         if not isinstance(start, dict) or start.get("type") != "start":
@@ -111,6 +156,8 @@ async def stream_transcription(ws: WebSocket):
     started = time.monotonic()
     last_partial_size = 0
     session_keyterms = list(dict.fromkeys(settings.configured_keyterms + claims.get("keyterms", [])))
+    context_entities = claims.get("entities", [])
+    enabled_intents = claims.get("intents", [])
 
     async def receive_audio():
         nonlocal last_partial_size
@@ -161,6 +208,23 @@ async def stream_transcription(ws: WebSocket):
                 # Refine the final text with OpenAI if configured (fail-open)
                 raw_text = text
                 refinement_status = "disabled"
+                interpretation_text = normalize_vnd(text, settings.stt_refine_money_separator) if text else text
+                dynamic_entity_terms = [
+                    term
+                    for entity in context_entities
+                    if entity.get("type") == "budget_jar"
+                    for term in [f"hũ {entity.get('label', '')}", *entity.get("aliases", [])]
+                    if isinstance(term, str) and term.strip()
+                ]
+                interpretation_text, _ = canonicalize_domain_entities(
+                    interpretation_text,
+                    settings.stt_refine_entities + session_keyterms + dynamic_entity_terms,
+                )
+                interpretation = interpret_transcript(
+                    interpretation_text,
+                    context_entities=context_entities,
+                    enabled_intents=enabled_intents,
+                ) if text else None
                 if text and settings.refine_enabled:
                     assert settings.openai_api_key is not None
                     refinement = await refine_transcript(
@@ -176,16 +240,20 @@ async def stream_transcription(ws: WebSocket):
                         names=settings.stt_refine_names,
                         term_aliases=settings.stt_refine_term_aliases,
                         entities=settings.stt_refine_entities,
+                        context_entities=context_entities,
+                        enabled_intents=enabled_intents,
                         min_similarity=settings.stt_refine_min_similarity,
                     )
                     text = refinement.text
                     refinement_status = refinement.status
+                    interpretation = refinement.interpretation
                 await ws.send_json({
                     "type": "final",
                     "text": text,
                     "raw_text": raw_text,
                     "refined": text != raw_text,
                     "refinement_status": refinement_status,
+                    "interpretation": interpretation.model_dump() if interpretation else None,
                     "reason": buffer.reason,
                 })
                 return
