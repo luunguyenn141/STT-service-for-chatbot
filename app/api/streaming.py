@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 import json
 import time
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -24,6 +25,7 @@ _active_sessions = 0
 class SessionRequest(BaseModel):
     origin: str = Field(max_length=512)
     keyterms: list[str] = Field(default_factory=list, max_length=20)
+    endpointing: Literal["silence", "manual"] = "silence"
 
     @field_validator("origin")
     @classmethod
@@ -65,7 +67,7 @@ async def create_session(body: SessionRequest, request: Request):
     if not allowed:
         raise HTTPException(429, "Too many streaming sessions.")
     return JSONResponse(
-        {"token": issue_ticket(settings, body.origin, body.keyterms), "expires_in": TICKET_TTL,
+        {"token": issue_ticket(settings, body.origin, body.keyterms, body.endpointing), "expires_in": TICKET_TTL,
          "sample_rate": SAMPLE_RATE, "format": "pcm_s16le", "channels": 1},
         headers={"Cache-Control": "no-store"},
     )
@@ -103,7 +105,7 @@ async def stream_transcription(ws: WebSocket):
         return
 
     _active_sessions += 1
-    buffer = UtteranceBuffer(settings)
+    buffer = UtteranceBuffer(settings, claims["endpointing"])
     changed = asyncio.Event()
     provider = _build_provider(settings)
     started = time.monotonic()

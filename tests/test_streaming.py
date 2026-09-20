@@ -30,10 +30,10 @@ def client(monkeypatch):
     assert streaming._active_sessions == 0
 
 
-def ticket(client, keyterms=None):
+def ticket(client, keyterms=None, endpointing="silence"):
     response = client.post(
         "/api/v1/stream-sessions",
-        json={"origin": ORIGIN, "keyterms": keyterms or []},
+        json={"origin": ORIGIN, "keyterms": keyterms or [], "endpointing": endpointing},
         headers={"x-api-key": "test-secret"},
     )
     assert response.status_code == 200
@@ -75,6 +75,7 @@ def test_ticket_carries_sanitized_session_keyterms(client):
     claims = protocol.read_ticket(Settings(_env_file=None, service_api_key="test-secret"), token, ORIGIN)
     assert claims is not None
     assert claims["keyterms"] == ["hũ Ăn uống", "hũ Tiết kiệm"]
+    assert claims["endpointing"] == "silence"
 
     response = client.post(
         "/api/v1/stream-sessions",
@@ -91,6 +92,17 @@ def test_ticket_carries_sanitized_session_keyterms(client):
     assert bounded_claims is not None
     assert 0 < len(bounded_claims["keyterms"]) < len(long_terms)
 
+    manual_claims = protocol.read_ticket(
+        Settings(_env_file=None, service_api_key="test-secret"), ticket(client, endpointing="manual"), ORIGIN,
+    )
+    assert manual_claims is not None
+    assert manual_claims["endpointing"] == "manual"
+    assert client.post(
+        "/api/v1/stream-sessions",
+        json={"origin": ORIGIN, "endpointing": "unknown"},
+        headers={"x-api-key": "test-secret"},
+    ).status_code == 422
+
 
 def test_pcm_buffer_ignores_silence_then_keeps_preroll_and_stops_at_pause():
     buffer = protocol.UtteranceBuffer(Settings(_env_file=None))
@@ -103,6 +115,17 @@ def test_pcm_buffer_ignores_silence_then_keeps_preroll_and_stops_at_pause():
     assert buffer.reason == "silence"
     assert buffer.has_speech
     assert bytes(buffer.audio).startswith(SILENCE * 10 + VOICE)
+
+
+def test_manual_endpointing_keeps_recording_through_pauses_until_stop():
+    buffer = protocol.UtteranceBuffer(Settings(_env_file=None), endpointing="manual")
+    buffer.feed(VOICE * 20 + SILENCE * 100)
+    assert buffer.has_speech
+    assert buffer.reason is None
+    buffer.feed(VOICE * 5)
+    assert buffer.reason is None
+    buffer.finish()
+    assert buffer.reason == "stop"
 
 
 def test_pcm_buffer_limits_long_speech_and_ignores_short_click():
