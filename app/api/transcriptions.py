@@ -25,6 +25,7 @@ from app.services.stt.base import (
 )
 from app.services.stt.elevenlabs import ElevenLabsSTTProvider
 from app.services.stt.phowhisper import PhoWhisperSTTProvider
+from app.services.transcript_refiner import refine_transcript
 
 logger = logging.getLogger("stt_poc.audit")
 router = APIRouter(prefix="/api/v1", tags=["transcriptions"])
@@ -207,9 +208,35 @@ async def create_transcription(request: Request):
         duration_ms,
     )
 
+    # 5. Optional: refine raw STT output with OpenAI (fail-open)
+    final_text = result.text
+    refinement_status = "disabled"
+    if settings.refine_enabled:
+        assert settings.openai_api_key is not None
+        refinement = await refine_transcript(
+            result.text,
+            openai_api_key=settings.openai_api_key.get_secret_value(),
+            keyterms=resolved_keyterms,
+            model=settings.openai_refine_model,
+            timeout_seconds=settings.stt_refine_timeout_seconds,
+            max_chars=settings.stt_refine_max_chars,
+            normalize_money=settings.stt_refine_money,
+            money_separator=settings.stt_refine_money_separator,
+            name_case=settings.stt_refine_name_case,
+            names=settings.stt_refine_names,
+            term_aliases=settings.stt_refine_term_aliases,
+            entities=settings.stt_refine_entities,
+            min_similarity=settings.stt_refine_min_similarity,
+        )
+        final_text = refinement.text
+        refinement_status = refinement.status
+
     return TranscriptionResponse(
         request_id=request_id,
-        text=result.text,
+        text=final_text,
+        raw_text=result.text,
+        refined=final_text != result.text,
+        refinement_status=refinement_status,
         language_code=result.language_code,
         language_probability=result.language_probability,
         words=[

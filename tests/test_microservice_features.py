@@ -24,7 +24,9 @@ def _mock_success_provider():
 
 
 @pytest.fixture(autouse=True)
-def reset_state():
+def reset_state(monkeypatch):
+    # Unit tests must never use a developer's real OpenAI key from .env.
+    monkeypatch.setenv("STT_REFINE_ENABLED", "false")
     rate_limiter.reset()
     get_settings.cache_clear()
     yield

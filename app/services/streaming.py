@@ -12,6 +12,7 @@ import struct
 import time
 import wave
 from collections import deque
+from typing import Literal
 
 from app.config import Settings
 
@@ -28,25 +29,52 @@ def _signing_key(settings: Settings) -> bytes:
     return _development_secret
 
 
-def issue_ticket(settings: Settings, origin: str) -> str:
-    claims = {"origin": origin, "exp": int(time.time()) + TICKET_TTL, "nonce": secrets.token_hex(16)}
+EndpointingMode = Literal["silence", "manual"]
+
+
+def issue_ticket(
+    settings: Settings,
+    origin: str,
+    keyterms: list[str] | None = None,
+    endpointing: EndpointingMode = "silence",
+) -> str:
+    claims = {
+        "origin": origin,
+        "exp": int(time.time()) + TICKET_TTL,
+        "nonce": secrets.token_hex(16),
+        "keyterms": (keyterms or [])[:20],
+        "endpointing": endpointing,
+    }
     payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
     signature = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
 
 
-def verify_ticket(settings: Settings, ticket: str, origin: str) -> bool:
+def read_ticket(settings: Settings, ticket: str, origin: str) -> dict | None:
     try:
         if not isinstance(ticket, str) or len(ticket) > 2048:
-            return False
+            return None
         payload, signature = ticket.split(".")
         expected = hmac.new(_signing_key(settings), payload.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(signature, expected):
-            return False
+            return None
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-        return claims["origin"] == origin and time.time() < claims["exp"] <= time.time() + TICKET_TTL + 1
+        keyterms = claims.get("keyterms", [])
+        if not isinstance(keyterms, list) or not all(isinstance(term, str) for term in keyterms):
+            return None
+        endpointing = claims.get("endpointing", "silence")
+        if endpointing not in {"silence", "manual"}:
+            return None
+        claims["endpointing"] = endpointing
+        if claims["origin"] != origin or not time.time() < claims["exp"] <= time.time() + TICKET_TTL + 1:
+            return None
+        return claims
     except (ValueError, KeyError, TypeError):
-        return False
+        return None
+
+
+def verify_ticket(settings: Settings, ticket: str, origin: str) -> bool:
+    return read_ticket(settings, ticket, origin) is not None
 
 
 def pcm_to_wav(pcm: bytes) -> bytes:
@@ -66,8 +94,9 @@ class UtteranceBuffer:
     evaluated in 20 ms frames regardless of network message boundaries.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, endpointing: EndpointingMode = "silence"):
         self.settings = settings
+        self.endpointing = endpointing
         self.pending = bytearray()
         self.audio = bytearray()
         self.preroll: deque[bytes] = deque(maxlen=10)
@@ -99,9 +128,9 @@ class UtteranceBuffer:
             self.voiced_ms += 20 if voiced else 0
             self.silent_ms = 0 if voiced else self.silent_ms + 20
             if self.silent_ms >= self.settings.stream_silence_ms:
-                if self.has_speech:
+                if self.has_speech and self.endpointing == "silence":
                     self.reason = "silence"
-                else:
+                elif not self.has_speech:
                     # A click/pop must not end the user's recording.
                     self.audio.clear()
                     self.voiced_ms = self.silent_ms = 0

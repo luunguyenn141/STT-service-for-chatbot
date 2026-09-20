@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,23 @@ class Settings(BaseSettings):
 
     elevenlabs_api_key: SecretStr | None = None
     stt_provider: str = "elevenlabs"
+
+    # ── OpenAI text refiner (optional post-processing) ──────────────────────
+    openai_api_key: SecretStr | None = None
+    openai_refine_model: str = "gpt-4o-mini"
+    stt_refine_enabled: bool = True
+    stt_refine_timeout_seconds: float = Field(default=8.0, gt=0, le=30)
+    stt_refine_max_chars: int = Field(default=6000, ge=100, le=20000)
+    stt_refine_money: bool = True
+    stt_refine_money_separator: Literal[".", ",", " ", ""] = "."
+    stt_refine_name_case: Literal["title", "upper", "preserve"] = "title"
+    stt_refine_names: list[str] = Field(default_factory=list)
+    stt_refine_term_aliases: dict[str, str] = Field(default_factory=dict)
+    stt_refine_entities: list[str] = Field(default_factory=lambda: [
+        "hũ chi tiêu", "hũ ăn uống", "hũ thiết yếu", "hũ di chuyển",
+        "hũ hưởng thụ", "hũ sức khỏe", "hũ tiết kiệm",
+    ])
+    stt_refine_min_similarity: float = Field(default=0.72, ge=0.5, le=1.0)
     stt_model_id: str = "scribe_v2"
     stt_keyterms: str = ""
     phowhisper_model_id: str = "vinai/PhoWhisper-base"
@@ -102,6 +120,13 @@ class Settings(BaseSettings):
     def is_auth_enabled(self) -> bool:
         return self.service_api_key is not None and bool(
             self.service_api_key.get_secret_value().strip()
+        )
+
+    @property
+    def refine_enabled(self) -> bool:
+        """True when an OpenAI key is present and refining is active."""
+        return self.stt_refine_enabled and self.openai_api_key is not None and bool(
+            self.openai_api_key.get_secret_value().strip()
         )
 
     @property

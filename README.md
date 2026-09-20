@@ -204,7 +204,8 @@ enough time for imports and loading the model into memory.
 Streaming uses a short-lived ticket and a bidirectional WebSocket:
 
 1. Chatbot backend calls `POST /api/v1/stream-sessions` with the service key
-   (`x-api-key` or Bearer) and JSON `{"origin":"https://your-chatbot.example.com"}`.
+   (`x-api-key` or Bearer) and JSON such as
+   `{"origin":"https://your-chatbot.example.com","keyterms":["hũ Ăn uống","hũ Tiết kiệm"]}`.
 2. Pass the returned `token` to the browser. It expires after 60 seconds and is
    bound to that Origin. Keep the service key on the chatbot backend.
 3. Browser connects to `wss://<endpoint>/api/v1/transcriptions/stream` and sends
@@ -212,11 +213,23 @@ Streaming uses a short-lived ticket and a bidirectional WebSocket:
 4. After `ready`, send **binary PCM16 little-endian, mono, 16 kHz** audio at live
    microphone speed. Recommended packet: 100 ms (3,200 bytes), maximum 500 ms.
 5. Consume `{"type":"partial","text":"..."}` by **replacing** the draft, not
-   appending. Each hypothesis describes the entire utterance so far.
+   appending. Each hypothesis describes the entire utterance so far. PFM keeps
+   these hypotheses hidden and uses them only as progress signals.
 6. Flush any remaining audio before `{"type":"stop"}`. A 900 ms pause also ends
    the utterance automatically. `finishing` means stop microphone capture;
-   `final` contains the final text and `reason` (`stop`, `silence`, `max_duration`).
+   `final` is emitted only after optional OpenAI refinement and contains `text`,
+   `raw_text`, `refined`, `refinement_status`, and `reason` (`stop`, `silence`,
+   `max_duration`).
    The server then closes the connection. Start a new session for a new utterance.
+
+When `OPENAI_API_KEY` and `STT_REFINE_ENABLED=true` are configured, the refiner
+uses a strict structured response and local guards for numbers, configured names,
+negations, edit distance, and domain entities. Jar names supplied through
+`keyterms` are normalized only in contextual phrases such as `từ hữu chi tiêu`
+and are protected from model substitutions. Explicit money phrases are then
+formatted deterministically, for example `năm trăm nghìn` becomes `500.000 VND`.
+Truncated, unsafe, timed-out, or invalid model output falls back to the
+deterministically normalized transcript; transcript content is never logged.
 
 Requires `STT_PROVIDER=phowhisper` and an updated image. PhoWhisper runs repeated
 inference on accumulated audio; this is near-real-time transcription, not a native
